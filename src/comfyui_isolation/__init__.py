@@ -35,6 +35,13 @@ from .env.detection import detect_cuda_version, detect_gpu_info, get_gpu_summary
 from .ipc.bridge import WorkerBridge
 from .ipc.worker import BaseWorker, register
 
+# TorchBridge is optional (requires PyTorch)
+try:
+    from .ipc.torch_bridge import TorchBridge, TorchWorker
+    _TORCH_AVAILABLE = True
+except ImportError:
+    _TORCH_AVAILABLE = False
+
 __all__ = [
     # Environment
     "IsolatedEnv",
@@ -43,8 +50,12 @@ __all__ = [
     "detect_cuda_version",
     "detect_gpu_info",
     "get_gpu_summary",
-    # IPC
+    # IPC (subprocess-based)
     "WorkerBridge",
     "BaseWorker",
     "register",
 ]
+
+# Add torch-based IPC if available
+if _TORCH_AVAILABLE:
+    __all__ += ["TorchBridge", "TorchWorker"]
