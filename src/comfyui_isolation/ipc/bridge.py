@@ -41,7 +41,10 @@ class WorkerBridge:
 
         bridge = WorkerBridge(env, worker_script=Path("worker.py"))
 
-        # Call methods on the worker
+        # Direct method calls (preferred)
+        result = bridge.process(image=my_image)
+
+        # Or use explicit call() method
         result = bridge.call("process", image=my_image)
     """
 
@@ -350,3 +353,35 @@ class WorkerBridge:
             self.stop()
         except Exception:
             pass
+
+    def __getattr__(self, name: str) -> Callable[..., Any]:
+        """
+        Enable direct method calls on the bridge.
+
+        Instead of:
+            result = bridge.call("inference", image=img)
+
+        You can do:
+            result = bridge.inference(image=img)
+
+        Args:
+            name: Method name to call on the worker
+
+        Returns:
+            A callable that forwards to self.call()
+        """
+        # Don't intercept private/magic attributes
+        if name.startswith("_"):
+            raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+
+        # Return a wrapper that calls the method on the worker
+        def method_wrapper(*args, timeout: float = 300.0, **kwargs) -> Any:
+            # If positional args provided, raise helpful error
+            if args:
+                raise TypeError(
+                    f"bridge.{name}() doesn't accept positional arguments. "
+                    f"Use keyword arguments: bridge.{name}(arg1=val1, arg2=val2)"
+                )
+            return self.call(name, timeout=timeout, **kwargs)
+
+        return method_wrapper
