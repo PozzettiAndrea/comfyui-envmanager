@@ -198,17 +198,21 @@ class IsolatedEnvManager:
             "--index-url", index_url,
         ]
 
+        # Install torch + torchvision together from same index to ensure ABI compatibility
         if env.pytorch_version:
             pip_args.append(f"torch=={env.pytorch_version}")
         else:
             pip_args.append("torch")
+
+        # Always install torchvision from the same index - uv will resolve matching version
+        pip_args.append("torchvision")
 
         result = subprocess.run(pip_args, capture_output=True, text=True)
 
         if result.returncode != 0:
             raise RuntimeError(f"Failed to install PyTorch: {result.stderr}")
 
-        self.log("PyTorch installed successfully")
+        self.log("PyTorch + torchvision installed successfully")
 
     def install_requirements(
         self,
