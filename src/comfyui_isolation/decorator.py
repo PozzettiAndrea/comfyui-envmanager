@@ -4,6 +4,17 @@ Decorator-based API for easy subprocess isolation.
 This module provides the @isolated decorator that makes it simple to run
 ComfyUI node methods in isolated subprocess environments.
 
+Architecture:
+    When a method is called in the HOST process (ComfyUI), the decorator
+    intercepts the call, spawns a subprocess using the isolated venv, and
+    forwards the call to that subprocess.
+
+    When the same module is imported in the WORKER subprocess, the decorator
+    detects COMFYUI_ISOLATION_WORKER=1 env var and becomes a transparent no-op,
+    allowing the method to execute normally.
+
+    This means NO CODE GENERATION - the original node file IS the worker.
+
 Example:
     from comfyui_isolation import isolated
 
@@ -24,23 +35,31 @@ Example:
             return (heavy_package.run(image),)
 """
 
+import os
+import sys
 import inspect
-import hashlib
-import textwrap
 import threading
+import subprocess
+import json
 from pathlib import Path
 from functools import wraps
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional
 
 from .env.config import IsolatedEnv
 from .env.config_file import load_env_from_file
-from .ipc.bridge import WorkerBridge
+from .env.manager import IsolatedEnvManager
 from .ipc.protocol import encode_object, decode_object
 
 
-# Global cache for bridges
-_bridge_cache: Dict[str, WorkerBridge] = {}
-_bridge_cache_lock = threading.Lock()
+# Global cache for environment managers and subprocess handles
+_env_cache: Dict[str, IsolatedEnvManager] = {}
+_process_cache: Dict[str, subprocess.Popen] = {}
+_cache_lock = threading.Lock()
+
+
+def _is_worker_mode() -> bool:
+    """Check if we're running inside the worker subprocess."""
+    return os.environ.get("COMFYUI_ISOLATION_WORKER") == "1"
 
 
 def isolated(
@@ -49,7 +68,7 @@ def isolated(
     config: Optional[str] = None,
     python: str = "3.10",
     cuda: Optional[str] = "auto",
-    timeout: float = 300.0,
+    timeout: float = 600.0,
     log_callback: Optional[Callable[[str], None]] = None,
     import_paths: Optional[List[str]] = None,
 ):
@@ -65,34 +84,18 @@ def isolated(
         config: Path to TOML config file (relative to node directory)
         python: Python version for the isolated env (default: "3.10")
         cuda: CUDA version ("12.4", "12.8", "auto", or None for CPU)
-        timeout: Default timeout for calls in seconds (default: 5 minutes)
+        timeout: Default timeout for calls in seconds (default: 10 minutes)
         log_callback: Optional callback for logging
         import_paths: List of directories to add to sys.path in subprocess
-                      (relative to node directory, e.g., ["worker", "vendor"])
-
-    Example with inline requirements:
-        @isolated(env="esrgan", requirements=["torch>=2.0", "realesrgan"])
-        class ESRGANUpscale:
-            FUNCTION = "upscale"
-
-            def upscale(self, image, scale):
-                import torch
-                from realesrgan import RealESRGANer
-                model = RealESRGANer(scale=scale)
-                return (model.enhance(image),)
-
-    Example with TOML config and import paths (for complex node packages):
-        @isolated(env="sam3d", config="comfyui_isolation_reqs.toml",
-                  import_paths=["worker", "vendor"])
-        class SAM3DNode:
-            FUNCTION = "generate"
-
-            def generate(self, image, mask):
-                from worker.stages import run_generate_slat
-                result = run_generate_slat(...)
-                return result
+                      (relative to node directory, e.g., [".", "../vendor"])
     """
     def decorator(cls):
+        # If we're in worker mode, be a no-op - just return the class unchanged
+        if _is_worker_mode():
+            return cls
+
+        # --- HOST MODE: Wrap the class to proxy calls to subprocess ---
+
         # Get the FUNCTION attribute to know which method to intercept
         func_name = getattr(cls, 'FUNCTION', None)
         if not func_name:
@@ -114,62 +117,39 @@ def isolated(
 
         # Handle if we're in a nodes/ subdirectory
         if node_dir.name == "nodes":
-            node_dir = node_dir.parent
+            node_package_dir = node_dir.parent
+        else:
+            node_package_dir = node_dir
 
-        # Extract source code of the method
-        try:
-            source = inspect.getsource(original_method)
-        except OSError as e:
-            raise ValueError(
-                f"Could not get source code of {cls.__name__}.{func_name}. "
-                f"The @isolated decorator requires the method source to be available. "
-                f"Error: {e}"
-            )
+        # Determine the module path for importing in subprocess
+        # e.g., "nodes.depth_estimate" or just "depth_estimate"
+        module_name = source_file.stem  # e.g., "depth_estimate"
+        if node_dir.name == "nodes":
+            module_name = f"nodes.{module_name}"
 
-        # Check for additional isolated methods
-        isolated_methods = getattr(cls, 'ISOLATED_METHODS', [func_name])
-        if func_name not in isolated_methods:
-            isolated_methods = [func_name] + list(isolated_methods)
+        # Only proxy the FUNCTION method - helper methods are called internally
+        # and don't need proxying (they run in the subprocess with the main method)
+        proxy = _create_proxy_method(
+            env_name=env,
+            requirements=requirements,
+            config_path=config,
+            python_version=python,
+            cuda_version=cuda,
+            method_name=func_name,
+            module_name=module_name,
+            class_name=cls.__name__,
+            node_dir=node_dir,
+            node_package_dir=node_package_dir,
+            default_timeout=timeout,
+            log_callback=log_callback,
+            original_method=original_method,
+            import_paths=import_paths,
+        )
 
-        # Collect all method sources
-        method_sources = {}
-        for method_name in isolated_methods:
-            method = getattr(cls, method_name, None)
-            if method is not None:
-                try:
-                    method_sources[method_name] = inspect.getsource(method)
-                except OSError:
-                    pass  # Skip methods without accessible source
-
-        # Create proxy methods for each isolated method
-        for method_name in isolated_methods:
-            if method_name not in method_sources:
-                continue
-
-            method_source = method_sources[method_name]
-            original = getattr(cls, method_name)
-
-            # Create the proxy
-            proxy = _create_proxy_method(
-                env_name=env,
-                requirements=requirements,
-                config_path=config,
-                python_version=python,
-                cuda_version=cuda,
-                method_name=method_name,
-                method_sources=method_sources,
-                node_dir=node_dir,
-                default_timeout=timeout,
-                log_callback=log_callback,
-                original_method=original,
-                import_paths=import_paths,
-            )
-
-            setattr(cls, method_name, proxy)
+        setattr(cls, func_name, proxy)
 
         # Store metadata on class
         cls._isolated_env = env
-        cls._isolated_methods = isolated_methods
         cls._isolated_node_dir = node_dir
 
         return cls
@@ -184,28 +164,33 @@ def _create_proxy_method(
     python_version: str,
     cuda_version: Optional[str],
     method_name: str,
-    method_sources: Dict[str, str],
+    module_name: str,
+    class_name: str,
     node_dir: Path,
+    node_package_dir: Path,
     default_timeout: float,
     log_callback: Optional[Callable],
     original_method: Callable,
     import_paths: Optional[List[str]] = None,
 ) -> Callable:
-    """
-    Create a proxy method that forwards calls to the isolated worker.
-    """
+    """Create a proxy method that forwards calls to the isolated worker."""
+
+    log = log_callback or (lambda msg: print(f"[{env_name}] {msg}"))
+
     @wraps(original_method)
     def proxy(self, *args, timeout: Optional[float] = None, **kwargs):
-        # Get or create bridge
-        bridge = _get_or_create_bridge(
+        # Get or create subprocess
+        process = _get_or_create_process(
             env_name=env_name,
             requirements=requirements,
             config_path=config_path,
             python_version=python_version,
             cuda_version=cuda_version,
-            method_sources=method_sources,
+            module_name=module_name,
+            class_name=class_name,
             node_dir=node_dir,
-            log_callback=log_callback,
+            node_package_dir=node_package_dir,
+            log_callback=log,
             import_paths=import_paths,
         )
 
@@ -215,83 +200,224 @@ def _create_proxy_method(
             bound = sig.bind(self, *args, **kwargs)
             bound.apply_defaults()
             call_kwargs = dict(bound.arguments)
-            del call_kwargs['self']  # Don't send self
-        except TypeError as e:
-            # Fall back to just using kwargs
+            del call_kwargs['self']
+        except TypeError:
             call_kwargs = kwargs
 
-        # Call the worker
-        actual_timeout = timeout if timeout is not None else default_timeout
-        result = bridge.call(method_name, timeout=actual_timeout, **call_kwargs)
+        # Serialize arguments
+        serialized_params = {}
+        for key, value in call_kwargs.items():
+            serialized_params[key] = encode_object(value)
 
-        return result
+        # Build JSON-RPC request
+        import random
+        request_id = random.randint(1, 1000000)
+        request = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": method_name,
+            "params": serialized_params,
+        }
+
+        # Send request
+        request_json = json.dumps(request) + "\n"
+        process.stdin.write(request_json)
+        process.stdin.flush()
+
+        # Read response with timeout
+        actual_timeout = timeout if timeout is not None else default_timeout
+
+        import select
+        ready, _, _ = select.select([process.stdout], [], [], actual_timeout)
+
+        if not ready:
+            # Timeout - kill process and raise
+            process.kill()
+            _remove_process(env_name, node_package_dir)
+            raise TimeoutError(f"Method {method_name} timed out after {actual_timeout}s")
+
+        response_line = process.stdout.readline()
+        if not response_line:
+            # Process died
+            _remove_process(env_name, node_package_dir)
+            raise RuntimeError(f"Worker process died unexpectedly")
+
+        response = json.loads(response_line)
+
+        # Check for error
+        if "error" in response:
+            error = response["error"]
+            error_msg = error.get("message", "Unknown error")
+            error_data = error.get("data", {})
+            tb = error_data.get("traceback", "")
+
+            # Re-raise as exception so ComfyUI can display it
+            raise RuntimeError(f"{error_msg}\n\nWorker traceback:\n{tb}")
+
+        # Deserialize result
+        result = response.get("result")
+        return decode_object(result)
 
     return proxy
 
 
-def _get_or_create_bridge(
+def _get_or_create_process(
     env_name: str,
     requirements: Optional[List[str]],
     config_path: Optional[str],
     python_version: str,
     cuda_version: Optional[str],
-    method_sources: Dict[str, str],
+    module_name: str,
+    class_name: str,
     node_dir: Path,
-    log_callback: Optional[Callable],
+    node_package_dir: Path,
+    log_callback: Callable,
     import_paths: Optional[List[str]] = None,
-) -> WorkerBridge:
-    """
-    Get or create a WorkerBridge for the given environment.
+) -> subprocess.Popen:
+    """Get or create a subprocess for the given environment."""
 
-    Creates the isolated environment and generates worker code on first call.
-    """
-    # Create cache key
-    cache_key = f"{env_name}:{node_dir}"
+    cache_key = f"{env_name}:{node_package_dir}"
 
-    with _bridge_cache_lock:
-        if cache_key in _bridge_cache:
-            return _bridge_cache[cache_key]
+    with _cache_lock:
+        if cache_key in _process_cache:
+            proc = _process_cache[cache_key]
+            if proc.poll() is None:  # Still running
+                return proc
+            else:
+                # Process died, remove from cache
+                del _process_cache[cache_key]
 
-    # Generate worker file
-    worker_dir = node_dir / f"_generated_{env_name}"
-    worker_dir.mkdir(exist_ok=True)
-    worker_file = worker_dir / "__main__.py"
+    # Ensure environment is set up
+    env_manager = _get_or_create_env(
+        env_name=env_name,
+        requirements=requirements,
+        config_path=config_path,
+        python_version=python_version,
+        cuda_version=cuda_version,
+        node_package_dir=node_package_dir,
+        log_callback=log_callback,
+    )
 
-    # Generate worker code from method sources
-    worker_code = _generate_worker_code(method_sources, node_dir, import_paths)
+    # Get Python executable from isolated env
+    python_exe = env_manager.get_python_path()
 
-    # Check if regeneration is needed
-    source_hash = hashlib.md5(worker_code.encode()).hexdigest()
-    hash_file = worker_dir / ".source_hash"
+    # Determine ComfyUI base directory
+    comfyui_base = None
+    if node_package_dir.parent.name == "custom_nodes":
+        comfyui_base = node_package_dir.parent.parent
 
-    needs_regen = True
-    if hash_file.exists() and worker_file.exists():
-        cached_hash = hash_file.read_text().strip()
-        if cached_hash == source_hash:
-            needs_regen = False
+    # Build import paths string
+    import_paths_str = None
+    if import_paths:
+        import_paths_str = ",".join(import_paths)
 
-    if needs_regen:
-        worker_file.write_text(worker_code)
-        hash_file.write_text(source_hash)
-        if log_callback:
-            log_callback(f"[{env_name}] Generated worker code")
+    # Build command to run the runner module
+    cmd = [
+        str(python_exe),
+        "-m", "comfyui_isolation.runner",
+        "--module", module_name,
+        "--class", class_name,
+        "--node-dir", str(node_dir),
+    ]
 
-    # Create environment config
-    if config_path:
-        # Load from TOML file
-        config_file = node_dir / config_path
+    if comfyui_base:
+        cmd.extend(["--comfyui-base", str(comfyui_base)])
+
+    if import_paths_str:
+        cmd.extend(["--import-paths", import_paths_str])
+
+    log_callback(f"Starting worker process...")
+    log_callback(f"  Python: {python_exe}")
+    log_callback(f"  Module: {module_name}")
+    log_callback(f"  Class: {class_name}")
+
+    # Spawn subprocess
+    process = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,  # Line buffered
+        cwd=str(node_dir),
+    )
+
+    # Start a thread to forward stderr to log
+    def forward_stderr():
+        for line in process.stderr:
+            log_callback(line.rstrip())
+
+    import threading
+    stderr_thread = threading.Thread(target=forward_stderr, daemon=True)
+    stderr_thread.start()
+
+    # Wait for ready signal
+    ready_line = process.stdout.readline()
+    if not ready_line:
+        stderr_output = process.stderr.read()
+        raise RuntimeError(f"Worker failed to start:\n{stderr_output}")
+
+    ready = json.loads(ready_line)
+    if ready.get("status") != "ready":
+        raise RuntimeError(f"Worker sent unexpected ready signal: {ready}")
+
+    log_callback(f"Worker ready")
+
+    # Cache the process
+    with _cache_lock:
+        _process_cache[cache_key] = process
+
+    return process
+
+
+def _remove_process(env_name: str, node_package_dir: Path):
+    """Remove a process from cache."""
+    cache_key = f"{env_name}:{node_package_dir}"
+    with _cache_lock:
+        if cache_key in _process_cache:
+            del _process_cache[cache_key]
+
+
+def _get_or_create_env(
+    env_name: str,
+    requirements: Optional[List[str]],
+    config_path: Optional[str],
+    python_version: str,
+    cuda_version: Optional[str],
+    node_package_dir: Path,
+    log_callback: Callable,
+) -> IsolatedEnvManager:
+    """Get or create an environment manager."""
+
+    cache_key = f"{env_name}:{node_package_dir}"
+
+    with _cache_lock:
+        if cache_key in _env_cache:
+            return _env_cache[cache_key]
+
+    # Auto-discover config file if not specified
+    resolved_config_path = config_path
+    if not resolved_config_path:
+        candidates = [
+            f"comfyui_isolation_reqs.toml",
+            f"comfyui_isolation_{env_name}.toml",
+            f"{env_name}_isolation.toml",
+            f"isolation.toml",
+        ]
+        for candidate in candidates:
+            if (node_package_dir / candidate).exists():
+                resolved_config_path = candidate
+                break
+
+    if resolved_config_path:
+        config_file = node_package_dir / resolved_config_path
         if not config_file.exists():
-            raise FileNotFoundError(
-                f"Config file not found: {config_file}. "
-                f"Specify a valid path or use inline requirements."
-            )
-        env_config = load_env_from_file(config_file, node_dir)
+            raise FileNotFoundError(f"Config file not found: {config_file}")
+        env_config = load_env_from_file(config_file, node_package_dir)
     else:
-        # Use inline requirements
         if requirements is None:
             requirements = []
 
-        # Handle 'auto' CUDA
         actual_cuda = cuda_version
         if cuda_version == "auto":
             from .env.detection import detect_cuda_version
@@ -304,177 +430,42 @@ def _get_or_create_bridge(
             requirements=requirements,
         )
 
-    # Override worker location to use generated file
-    env_config.worker_script = str(worker_file.relative_to(node_dir))
+    # Create environment manager
+    env_manager = IsolatedEnvManager(env_config, base_dir=node_package_dir)
 
-    # Create bridge
-    bridge = WorkerBridge(
-        env=env_config,
-        worker_script=worker_file,
-        base_dir=node_dir,
-        log_callback=log_callback or (lambda msg: print(f"[{env_name}] {msg}")),
-        auto_start=True,
-    )
+    log_callback("=" * 50)
+    log_callback(f"Setting up isolated environment: {env_name}")
+    log_callback("=" * 50)
 
     # Ensure environment is ready
-    bridge.ensure_environment()
+    if env_manager.is_ready():
+        log_callback("Environment already ready, skipping setup")
+    else:
+        log_callback("Creating isolated environment...")
+        env_manager.setup()
 
-    # Cache the bridge
-    with _bridge_cache_lock:
-        _bridge_cache[cache_key] = bridge
+    # Cache the manager
+    with _cache_lock:
+        _env_cache[cache_key] = env_manager
 
-    return bridge
-
-
-def _generate_worker_code(
-    method_sources: Dict[str, str],
-    node_dir: Path,
-    import_paths: Optional[List[str]] = None,
-) -> str:
-    """
-    Generate worker code from method sources.
-
-    Transforms class methods into standalone worker methods.
-    """
-    # Build the worker file
-    lines = [
-        '"""Auto-generated worker for isolated node execution."""',
-        '',
-        'import sys',
-        'import warnings',
-        'import logging',
-        'import os',
-        '',
-        '# Suppress output that could interfere with JSON IPC',
-        'warnings.filterwarnings("ignore")',
-        'os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")',
-        'logging.disable(logging.WARNING)',
-        '',
-    ]
-
-    # Auto-detect ComfyUI location from node_dir
-    # Nodes are typically at: ComfyUI/custom_nodes/NodePackage/
-    comfyui_base = None
-    if node_dir.parent.name == "custom_nodes":
-        comfyui_base = node_dir.parent.parent
-    elif node_dir.parent.parent.name == "custom_nodes":
-        # Handle nested: ComfyUI/custom_nodes/NodePackage/nodes/
-        comfyui_base = node_dir.parent.parent.parent
-
-    # Add import paths to sys.path
-    lines.append(f'# Add node package paths for imports')
-    lines.append(f'_NODE_DIR = "{node_dir}"')
-
-    # Add ComfyUI base first so folder_paths is available
-    if comfyui_base and comfyui_base.exists():
-        lines.append(f'# ComfyUI base (for folder_paths, etc.)')
-        lines.append(f'sys.path.insert(0, "{comfyui_base}")')
-
-    if import_paths:
-        for path in import_paths:
-            full_path = node_dir / path
-            lines.append(f'sys.path.insert(0, "{full_path}")')
-
-    # Also add the node_dir itself so relative imports work
-    lines.append(f'sys.path.insert(0, "{node_dir}")')
-    lines.append('')
-
-    lines.extend([
-        'from comfyui_isolation import BaseWorker, register',
-        '',
-        '',
-        'class GeneratedWorker(BaseWorker):',
-        '    """Auto-generated worker with isolated node methods."""',
-        '',
-    ])
-
-    # Add each method
-    for method_name, source in method_sources.items():
-        # Parse and transform the method
-        transformed = _transform_method(source, method_name)
-        lines.append(transformed)
-        lines.append('')
-
-    # Add main entry point
-    lines.extend([
-        '',
-        'if __name__ == "__main__":',
-        '    GeneratedWorker().run()',
-        '',
-    ])
-
-    return '\n'.join(lines)
+    return env_manager
 
 
-def _transform_method(source: str, method_name: str) -> str:
-    """
-    Transform a class method into a worker method.
-
-    Changes:
-    - Removes 'self' from first parameter (we add our own)
-    - Adds @register decorator
-    - Handles indentation
-    """
-    # Dedent the source
-    source = textwrap.dedent(source)
-
-    # Split into lines
-    lines = source.split('\n')
-
-    # Find the def line
-    result_lines = []
-    found_def = False
-
-    for line in lines:
-        stripped = line.lstrip()
-
-        if not found_def and stripped.startswith('def '):
-            # This is the function definition
-            found_def = True
-
-            # Parse the signature
-            # Pattern: def method_name(self, arg1, arg2, ...):
-            import re
-            match = re.match(r'def\s+(\w+)\s*\(\s*self\s*,?\s*(.*?)\)\s*:', stripped)
-
-            if match:
-                name = match.group(1)
-                params = match.group(2).strip()
-
-                # Rebuild with self added back (for BaseWorker methods)
-                if params:
-                    new_def = f"def {name}(self, {params}):"
-                else:
-                    new_def = f"def {name}(self):"
-
-                # Add decorator and method
-                result_lines.append(f'    @register("{method_name}")')
-                result_lines.append(f'    {new_def}')
-            else:
-                # Fallback: keep original but add decorator
-                result_lines.append(f'    @register("{method_name}")')
-                result_lines.append(f'    {stripped}')
-        else:
-            # Regular line - add class indentation
-            if line.strip():  # Non-empty
-                result_lines.append('    ' + line)
-            else:
-                result_lines.append('')
-
-    return '\n'.join(result_lines)
-
-
-def shutdown_all_bridges():
-    """Shutdown all cached bridges."""
-    with _bridge_cache_lock:
-        for bridge in _bridge_cache.values():
+def shutdown_all_processes():
+    """Shutdown all cached processes."""
+    with _cache_lock:
+        for process in _process_cache.values():
             try:
-                bridge.stop()
+                # Send shutdown command
+                shutdown_req = json.dumps({"jsonrpc": "2.0", "id": 0, "method": "shutdown"}) + "\n"
+                process.stdin.write(shutdown_req)
+                process.stdin.flush()
+                process.wait(timeout=5)
             except Exception:
-                pass
-        _bridge_cache.clear()
+                process.kill()
+        _process_cache.clear()
 
 
 # Register cleanup on module unload
 import atexit
-atexit.register(shutdown_all_bridges)
+atexit.register(shutdown_all_processes)
