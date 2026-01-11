@@ -36,15 +36,27 @@ logger = logging.getLogger("comfyui_isolation")
 # Sentinel value for shutdown
 _SHUTDOWN = object()
 
+# Message type for method calls (avoids pickling issues with functions)
+_CALL_METHOD = "call_method"
+
 
 def _worker_loop(queue_in, queue_out):
     """
     Worker process main loop.
 
-    Receives (func, args, kwargs) tuples, executes func, returns results.
+    Receives work items and executes them:
+    - ("call_method", module_name, class_name, method_name, self_state, kwargs): Call a method on a class
+    - (func, args, kwargs): Execute a function directly
+    - _SHUTDOWN: Shutdown the worker
+
     Runs until receiving _SHUTDOWN sentinel.
     """
+    import importlib
+    import os
     import sys
+
+    # Set worker mode env var
+    os.environ["COMFYUI_ISOLATION_WORKER"] = "1"
 
     while True:
         try:
@@ -55,11 +67,20 @@ def _worker_loop(queue_in, queue_out):
                 queue_out.put(("shutdown", None))
                 break
 
-            func, args, kwargs = item
-
             try:
-                result = func(*args, **kwargs)
-                queue_out.put(("ok", result))
+                # Handle method call protocol
+                if isinstance(item, tuple) and len(item) == 6 and item[0] == _CALL_METHOD:
+                    _, module_name, class_name, method_name, self_state, kwargs = item
+                    result = _execute_method_call(
+                        module_name, class_name, method_name, self_state, kwargs
+                    )
+                    queue_out.put(("ok", result))
+                else:
+                    # Direct function call (legacy)
+                    func, args, kwargs = item
+                    result = func(*args, **kwargs)
+                    queue_out.put(("ok", result))
+
             except Exception as e:
                 tb = traceback.format_exc()
                 queue_out.put(("error", (str(e), tb)))
@@ -71,6 +92,49 @@ def _worker_loop(queue_in, queue_out):
             except:
                 pass
             break
+
+
+def _execute_method_call(module_name: str, class_name: str, method_name: str,
+                         self_state: dict, kwargs: dict) -> Any:
+    """
+    Execute a method call in the worker process.
+
+    This function imports the class fresh and calls the original (un-decorated) method.
+    """
+    import importlib
+
+    # Import the module
+    module = importlib.import_module(module_name)
+    cls = getattr(module, class_name)
+
+    # Create instance with proper __slots__ handling
+    instance = object.__new__(cls)
+
+    # Handle both __slots__ and __dict__ based classes
+    if hasattr(cls, '__slots__'):
+        # Class uses __slots__ - set attributes individually
+        for slot in cls.__slots__:
+            if slot in self_state:
+                setattr(instance, slot, self_state[slot])
+        # Also check for __dict__ slot (hybrid classes)
+        if '__dict__' in cls.__slots__ or hasattr(instance, '__dict__'):
+            for key, value in self_state.items():
+                if key not in cls.__slots__:
+                    setattr(instance, key, value)
+    else:
+        # Standard class with __dict__
+        instance.__dict__.update(self_state)
+
+    # Get the ORIGINAL method stored by the decorator, not the proxy
+    # This avoids the infinite recursion of proxy -> worker -> proxy
+    original_method = getattr(cls, '_isolated_original_method', None)
+    if original_method is None:
+        # Fallback: class wasn't decorated, use the method directly
+        original_method = getattr(cls, method_name)
+        return original_method(instance, **kwargs)
+
+    # Call the original method (it's an unbound function, pass instance)
+    return original_method(instance, **kwargs)
 
 
 class TorchMPWorker(Worker):
@@ -156,7 +220,55 @@ class TorchMPWorker(Worker):
         # Send work item
         self._queue_in.put((func, args, kwargs))
 
-        # Wait for result
+        return self._get_result(timeout)
+
+    def call_method(
+        self,
+        module_name: str,
+        class_name: str,
+        method_name: str,
+        self_state: dict,
+        kwargs: dict,
+        timeout: Optional[float] = None,
+    ) -> Any:
+        """
+        Execute a class method in the worker process.
+
+        This uses a string-based protocol to avoid pickle issues with decorated methods.
+        The worker imports the module fresh and calls the original (un-decorated) method.
+
+        Args:
+            module_name: Full module path (e.g., 'my_package.nodes.my_node')
+            class_name: Class name (e.g., 'MyNode')
+            method_name: Method name (e.g., 'process')
+            self_state: Instance __dict__ to restore
+            kwargs: Method keyword arguments
+            timeout: Timeout in seconds (None = no timeout, default).
+
+        Returns:
+            Return value of method.
+
+        Raises:
+            WorkerError: If method raises an exception.
+            TimeoutError: If execution exceeds timeout.
+            RuntimeError: If worker process dies.
+        """
+        self._ensure_started()
+
+        # Send method call request using protocol
+        self._queue_in.put((
+            _CALL_METHOD,
+            module_name,
+            class_name,
+            method_name,
+            self_state,
+            kwargs,
+        ))
+
+        return self._get_result(timeout)
+
+    def _get_result(self, timeout: Optional[float]) -> Any:
+        """Wait for and return result from worker."""
         try:
             status, result = self._queue_out.get(timeout=timeout)
         except QueueEmpty:

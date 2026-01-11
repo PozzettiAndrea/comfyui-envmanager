@@ -80,53 +80,6 @@ def _describe_args(args: dict) -> str:
     return ", ".join(parts) if parts else "(no args)"
 
 
-def _call_method_in_worker(module_name: str, class_name: str, method_name: str, self_state: dict, kwargs: dict):
-    """
-    Helper function that runs in worker to call the original method.
-
-    This function is picklable and imports the class fresh in the worker.
-    We access the stored original method to avoid calling the proxy.
-    """
-    import importlib
-    import os
-
-    # Set worker mode env var for any nested operations
-    os.environ["COMFYUI_ISOLATION_WORKER"] = "1"
-
-    # Import the module
-    module = importlib.import_module(module_name)
-    cls = getattr(module, class_name)
-
-    # Create instance with proper __slots__ handling
-    instance = object.__new__(cls)
-
-    # Handle both __slots__ and __dict__ based classes
-    if hasattr(cls, '__slots__'):
-        # Class uses __slots__ - set attributes individually
-        for slot in cls.__slots__:
-            if slot in self_state:
-                setattr(instance, slot, self_state[slot])
-        # Also check for __dict__ slot (hybrid classes)
-        if '__dict__' in cls.__slots__ or hasattr(instance, '__dict__'):
-            for key, value in self_state.items():
-                if key not in cls.__slots__:
-                    setattr(instance, key, value)
-    else:
-        # Standard class with __dict__
-        instance.__dict__.update(self_state)
-
-    # Get the ORIGINAL method stored by the decorator, not the proxy
-    # This avoids the infinite recursion of proxy -> worker -> proxy
-    original_method = getattr(cls, '_isolated_original_method', None)
-    if original_method is None:
-        # Fallback: class wasn't decorated, use the method directly
-        original_method = getattr(cls, method_name)
-        return original_method(instance, **kwargs)
-
-    # Call the original method (it's an unbound function, pass instance)
-    return original_method(instance, **kwargs)
-
-
 def _clone_tensor_if_needed(obj: Any, smart_clone: bool = True) -> Any:
     """
     Defensively clone tensors to prevent mutation/re-share bugs.
@@ -409,16 +362,15 @@ def isolated(
                 # Get module name for import in worker
                 module_name = cls.__module__
 
-                # Call worker using helper function that imports class fresh
+                # Call worker using appropriate method
                 if worker_config.python is None:
-                    # TorchMPWorker - use helper function
-                    result = worker.call(
-                        _call_method_in_worker,
-                        module_name,
-                        cls.__name__,
-                        func_name,
-                        self.__dict__.copy(),  # Pass instance state
-                        call_kwargs,
+                    # TorchMPWorker - use call_method protocol (avoids pickle issues)
+                    result = worker.call_method(
+                        module_name=module_name,
+                        class_name=cls.__name__,
+                        method_name=func_name,
+                        self_state=self.__dict__.copy(),
+                        kwargs=call_kwargs,
                         timeout=timeout,
                     )
                 else:
