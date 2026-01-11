@@ -5,68 +5,54 @@ This module provides the @isolated decorator that makes it simple to run
 ComfyUI node methods in isolated subprocess environments.
 
 Architecture:
-    When a method is called in the HOST process (ComfyUI), the decorator
-    intercepts the call, spawns a subprocess using the isolated venv, and
-    forwards the call to that subprocess.
+    The decorator wraps the node's FUNCTION method. When called in the HOST
+    process, it forwards the call to an isolated worker (TorchMPWorker for
+    same-venv, PersistentVenvWorker for different venv).
 
-    When the same module is imported in the WORKER subprocess, the decorator
-    detects COMFYUI_ISOLATION_WORKER=1 env var and becomes a transparent no-op,
-    allowing the method to execute normally.
-
-    This means NO CODE GENERATION - the original node file IS the worker.
+    When imported in the WORKER subprocess (COMFYUI_ISOLATION_WORKER=1),
+    the decorator is a transparent no-op.
 
 Example:
     from comfyui_isolation import isolated
 
-    @isolated(env="myenv", requirements=["torch", "heavy-package"])
+    @isolated(env="myenv")
     class MyNode:
-        @classmethod
-        def INPUT_TYPES(cls):
-            return {"required": {"image": ("IMAGE",)}}
-
-        RETURN_TYPES = ("IMAGE",)
         FUNCTION = "process"
-        CATEGORY = "MyNodes"
+        RETURN_TYPES = ("IMAGE",)
 
         def process(self, image):
             # This code runs in isolated subprocess
-            import torch
             import heavy_package
             return (heavy_package.run(image),)
+
+Implementation:
+    This decorator is thin sugar over the workers module. Internally it uses:
+    - TorchMPWorker: Same Python, zero-copy tensor transfer via torch.mp.Queue
+    - PersistentVenvWorker: Different venv, tensor transfer via torch.save/load
 """
 
 import os
 import sys
-import socket
+import atexit
 import inspect
+import logging
 import threading
-import subprocess
-import json
+import time
 from dataclasses import dataclass
-from pathlib import Path
 from functools import wraps
-from typing import Any, Callable, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Union
 
-from .env.config import IsolatedEnv
-from .env.config_file import load_env_from_file
-from .env.manager import IsolatedEnvManager
-from .ipc.protocol import encode_object, decode_object
-from .ipc.transport import UnixSocketTransport, get_socket_path, cleanup_socket
+logger = logging.getLogger("comfyui_isolation")
 
-
-@dataclass
-class WorkerProcess:
-    """Holds a worker subprocess and its transport."""
-    process: subprocess.Popen
-    transport: UnixSocketTransport
-    socket_path: str
-    server_socket: socket.socket
+# Enable verbose logging by default (can be disabled)
+VERBOSE_LOGGING = os.environ.get("COMFYUI_ISOLATION_QUIET", "0") != "1"
 
 
-# Global cache for environment managers and worker processes
-_env_cache: Dict[str, IsolatedEnvManager] = {}
-_process_cache: Dict[str, WorkerProcess] = {}
-_cache_lock = threading.Lock()
+def _log(env_name: str, msg: str):
+    """Log with environment prefix."""
+    if VERBOSE_LOGGING:
+        print(f"[{env_name}] {msg}")
 
 
 def _is_worker_mode() -> bool:
@@ -74,459 +60,402 @@ def _is_worker_mode() -> bool:
     return os.environ.get("COMFYUI_ISOLATION_WORKER") == "1"
 
 
+def _describe_tensor(t) -> str:
+    """Get human-readable tensor description."""
+    try:
+        import torch
+        if isinstance(t, torch.Tensor):
+            size_mb = t.numel() * t.element_size() / (1024 * 1024)
+            return f"Tensor({list(t.shape)}, {t.dtype}, {t.device}, {size_mb:.1f}MB)"
+    except:
+        pass
+    return str(type(t).__name__)
+
+
+def _describe_args(args: dict) -> str:
+    """Describe arguments for logging."""
+    parts = []
+    for k, v in args.items():
+        parts.append(f"{k}={_describe_tensor(v)}")
+    return ", ".join(parts) if parts else "(no args)"
+
+
+def _call_method_in_worker(module_name: str, class_name: str, method_name: str, self_state: dict, kwargs: dict):
+    """
+    Helper function that runs in worker to call the original method.
+
+    This function is picklable and imports the class fresh in the worker.
+    We access the stored original method to avoid calling the proxy.
+    """
+    import importlib
+    import os
+
+    # Set worker mode env var for any nested operations
+    os.environ["COMFYUI_ISOLATION_WORKER"] = "1"
+
+    # Import the module
+    module = importlib.import_module(module_name)
+    cls = getattr(module, class_name)
+
+    # Create instance with proper __slots__ handling
+    instance = object.__new__(cls)
+
+    # Handle both __slots__ and __dict__ based classes
+    if hasattr(cls, '__slots__'):
+        # Class uses __slots__ - set attributes individually
+        for slot in cls.__slots__:
+            if slot in self_state:
+                setattr(instance, slot, self_state[slot])
+        # Also check for __dict__ slot (hybrid classes)
+        if '__dict__' in cls.__slots__ or hasattr(instance, '__dict__'):
+            for key, value in self_state.items():
+                if key not in cls.__slots__:
+                    setattr(instance, key, value)
+    else:
+        # Standard class with __dict__
+        instance.__dict__.update(self_state)
+
+    # Get the ORIGINAL method stored by the decorator, not the proxy
+    # This avoids the infinite recursion of proxy -> worker -> proxy
+    original_method = getattr(cls, '_isolated_original_method', None)
+    if original_method is None:
+        # Fallback: class wasn't decorated, use the method directly
+        original_method = getattr(cls, method_name)
+        return original_method(instance, **kwargs)
+
+    # Call the original method (it's an unbound function, pass instance)
+    return original_method(instance, **kwargs)
+
+
+def _clone_tensor_if_needed(obj: Any, smart_clone: bool = True) -> Any:
+    """
+    Defensively clone tensors to prevent mutation/re-share bugs.
+
+    This handles:
+    1. Input tensors that might be mutated in worker
+    2. Output tensors received via IPC that can't be re-shared
+
+    Args:
+        obj: Object to process (tensor or nested structure)
+        smart_clone: If True, use smart CUDA IPC detection (only clone
+                    when necessary). If False, always clone.
+    """
+    if smart_clone:
+        # Use smart detection - only clones CUDA tensors that can't be re-shared
+        from .workers.tensor_utils import prepare_for_ipc_recursive
+        return prepare_for_ipc_recursive(obj)
+
+    # Fallback: always clone (original behavior)
+    try:
+        import torch
+        if isinstance(obj, torch.Tensor):
+            return obj.clone()
+        elif isinstance(obj, (list, tuple)):
+            cloned = [_clone_tensor_if_needed(x, smart_clone=False) for x in obj]
+            return type(obj)(cloned)
+        elif isinstance(obj, dict):
+            return {k: _clone_tensor_if_needed(v, smart_clone=False) for k, v in obj.items()}
+    except ImportError:
+        pass
+    return obj
+
+
+# ---------------------------------------------------------------------------
+# Worker Management
+# ---------------------------------------------------------------------------
+
+@dataclass
+class WorkerConfig:
+    """Configuration for an isolated worker."""
+    env_name: str
+    python: Optional[str] = None  # None = same Python (TorchMPWorker)
+    working_dir: Optional[Path] = None
+    sys_path: Optional[List[str]] = None
+    timeout: float = 600.0
+
+
+# Global worker cache
+_workers: Dict[str, Any] = {}
+_workers_lock = threading.Lock()
+
+
+def _get_or_create_worker(config: WorkerConfig, log_fn: Callable):
+    """Get or create a worker for the given configuration.
+
+    Thread-safe: worker creation happens inside the lock to prevent
+    race conditions where multiple threads create duplicate workers.
+    """
+    cache_key = f"{config.env_name}:{config.python or 'same'}"
+
+    with _workers_lock:
+        if cache_key in _workers:
+            worker = _workers[cache_key]
+            if worker.is_alive():
+                return worker
+            # Worker died, recreate
+            log_fn(f"Worker died, recreating...")
+
+        # Create new worker INSIDE the lock (fixes race condition)
+        if config.python is None:
+            # Same Python - use TorchMPWorker (fast, zero-copy)
+            from .workers import TorchMPWorker
+            log_fn(f"Creating TorchMPWorker (same Python, zero-copy tensors)")
+            worker = TorchMPWorker(name=config.env_name)
+        else:
+            # Different Python - use PersistentVenvWorker
+            from .workers.venv import PersistentVenvWorker
+            log_fn(f"Creating PersistentVenvWorker (python={config.python})")
+            worker = PersistentVenvWorker(
+                python=config.python,
+                working_dir=config.working_dir,
+                sys_path=config.sys_path,
+                name=config.env_name,
+            )
+
+        _workers[cache_key] = worker
+        return worker
+
+
+def shutdown_all_processes():
+    """Shutdown all cached workers. Called at exit."""
+    with _workers_lock:
+        for name, worker in _workers.items():
+            try:
+                worker.shutdown()
+            except Exception as e:
+                logger.debug(f"Error shutting down {name}: {e}")
+        _workers.clear()
+
+
+atexit.register(shutdown_all_processes)
+
+
+# ---------------------------------------------------------------------------
+# The @isolated Decorator
+# ---------------------------------------------------------------------------
+
 def isolated(
     env: str,
     requirements: Optional[List[str]] = None,
     config: Optional[str] = None,
-    python: str = "3.10",
+    python: Optional[str] = None,
     cuda: Optional[str] = "auto",
     timeout: float = 600.0,
     log_callback: Optional[Callable[[str], None]] = None,
     import_paths: Optional[List[str]] = None,
+    clone_tensors: bool = True,
+    same_venv: bool = False,
 ):
     """
-    Class decorator that makes node methods run in isolated subprocess.
+    Class decorator that runs node methods in isolated subprocess.
 
-    The decorated class's FUNCTION method will be intercepted and executed
-    in an isolated Python environment with its own dependencies.
+    The decorated class's FUNCTION method will be executed in an isolated
+    Python environment. Tensors are transferred efficiently via PyTorch's
+    native IPC mechanisms (CUDA IPC for GPU, shared memory for CPU).
+
+    By default, auto-discovers config file (comfyui_isolation_reqs.toml) and
+    uses full venv isolation with PersistentVenvWorker. Use same_venv=True
+    for lightweight same-venv isolation with TorchMPWorker.
 
     Args:
-        env: Name of the isolated environment (used for caching)
-        requirements: List of pip requirements (e.g., ["torch", "numpy"])
-        config: Path to TOML config file (relative to node directory)
-        python: Python version for the isolated env (default: "3.10")
-        cuda: CUDA version ("12.4", "12.8", "auto", or None for CPU)
-        timeout: Default timeout for calls in seconds (default: 10 minutes)
+        env: Name of the isolated environment (used for logging/caching)
+        requirements: [DEPRECATED] Use config file instead
+        config: Path to TOML config file. If None, auto-discovers in node directory.
+        python: Path to Python executable (overrides config-based detection)
+        cuda: [DEPRECATED] Detected automatically
+        timeout: Timeout for calls in seconds (default: 10 minutes)
         log_callback: Optional callback for logging
-        import_paths: List of directories to add to sys.path in subprocess
-                      (relative to node directory, e.g., [".", "../vendor"])
+        import_paths: Paths to add to sys.path in worker
+        clone_tensors: Clone tensors at boundary to prevent mutation bugs (default: True)
+        same_venv: If True, use TorchMPWorker (same venv, just process isolation).
+                   If False (default), use full venv isolation with auto-discovered config.
+
+    Example:
+        # Full venv isolation (default) - auto-discovers comfyui_isolation_reqs.toml
+        @isolated(env="sam3d")
+        class MyNode:
+            FUNCTION = "process"
+
+            def process(self, image):
+                import heavy_lib
+                return heavy_lib.run(image)
+
+        # Lightweight same-venv isolation (opt-in)
+        @isolated(env="sam3d", same_venv=True)
+        class MyLightNode:
+            FUNCTION = "process"
+            ...
     """
     def decorator(cls):
-        # If we're in worker mode, be a no-op - just return the class unchanged
+        # In worker mode, decorator is a no-op
         if _is_worker_mode():
             return cls
 
-        # --- HOST MODE: Wrap the class to proxy calls to subprocess ---
+        # --- HOST MODE: Wrap the FUNCTION method ---
 
-        # Get the FUNCTION attribute to know which method to intercept
         func_name = getattr(cls, 'FUNCTION', None)
         if not func_name:
             raise ValueError(
-                f"Node class {cls.__name__} must have FUNCTION attribute. "
-                f"This tells ComfyUI which method to call."
+                f"Node class {cls.__name__} must have FUNCTION attribute."
             )
 
         original_method = getattr(cls, func_name, None)
         if original_method is None:
             raise ValueError(
                 f"Node class {cls.__name__} has FUNCTION='{func_name}' but "
-                f"no method with that name is defined."
+                f"no method with that name."
             )
 
-        # Get the source file directory
+        # Get source file info for sys.path setup
         source_file = Path(inspect.getfile(cls))
         node_dir = source_file.parent
-
-        # Handle if we're in a nodes/ subdirectory
         if node_dir.name == "nodes":
             node_package_dir = node_dir.parent
         else:
             node_package_dir = node_dir
 
-        # Determine the module path for importing in subprocess
-        # Just use the file stem - node_dir is added to sys.path
-        module_name = source_file.stem  # e.g., "depth_estimate"
+        # Build sys.path for worker
+        sys_path_additions = [str(node_dir)]
+        if import_paths:
+            for p in import_paths:
+                full_path = node_dir / p
+                sys_path_additions.append(str(full_path.resolve()))
 
-        # Only proxy the FUNCTION method - helper methods are called internally
-        # and don't need proxying (they run in the subprocess with the main method)
-        proxy = _create_proxy_method(
+        # Resolve python path for venv isolation
+        resolved_python = python
+        env_config = None
+
+        # If same_venv=True, skip venv isolation entirely
+        if same_venv:
+            _log(env, "Using same-venv isolation (TorchMPWorker)")
+            resolved_python = None
+
+        # Otherwise, try to get a venv python path
+        elif python:
+            # Explicit python path provided
+            resolved_python = python
+
+        else:
+            # Auto-discover or use explicit config
+            if config:
+                # Explicit config file specified
+                config_file = node_package_dir / config
+                if config_file.exists():
+                    from .env.config_file import load_env_from_file
+                    env_config = load_env_from_file(config_file, node_package_dir)
+                else:
+                    _log(env, f"Warning: Config file not found: {config_file}")
+            else:
+                # Auto-discover config file
+                from .env.config_file import discover_env_config
+                env_config = discover_env_config(node_package_dir)
+                if env_config:
+                    _log(env, f"Auto-discovered config: {env_config.name}")
+
+            # If we have a config, set up the venv
+            if env_config:
+                from .env.manager import IsolatedEnvManager
+                manager = IsolatedEnvManager(base_dir=node_package_dir)
+
+                if not manager.is_ready(env_config):
+                    _log(env, f"Setting up isolated environment...")
+                    manager.setup(env_config)
+
+                resolved_python = str(manager.get_python(env_config))
+            else:
+                # No config found - fall back to same-venv isolation
+                _log(env, "No config found, using same-venv isolation (TorchMPWorker)")
+                resolved_python = None
+
+        # Create worker config
+        worker_config = WorkerConfig(
             env_name=env,
-            requirements=requirements,
-            config_path=config,
-            python_version=python,
-            cuda_version=cuda,
-            method_name=func_name,
-            module_name=module_name,
-            class_name=cls.__name__,
-            node_dir=node_dir,
-            node_package_dir=node_package_dir,
-            default_timeout=timeout,
-            log_callback=log_callback,
-            original_method=original_method,
-            import_paths=import_paths,
+            python=resolved_python,
+            working_dir=node_dir,
+            sys_path=sys_path_additions,
+            timeout=timeout,
         )
 
+        # Setup logging
+        log_fn = log_callback or (lambda msg: _log(env, msg))
+
+        # Create the proxy method
+        @wraps(original_method)
+        def proxy(self, *args, **kwargs):
+            # Get or create worker
+            worker = _get_or_create_worker(worker_config, log_fn)
+
+            # Bind arguments to get kwargs dict
+            sig = inspect.signature(original_method)
+            try:
+                bound = sig.bind(self, *args, **kwargs)
+                bound.apply_defaults()
+                call_kwargs = dict(bound.arguments)
+                del call_kwargs['self']
+            except TypeError:
+                call_kwargs = kwargs
+
+            # Log entry with argument descriptions
+            if VERBOSE_LOGGING:
+                log_fn(f"→ {cls.__name__}.{func_name}({_describe_args(call_kwargs)})")
+
+            start_time = time.time()
+
+            try:
+                # Clone tensors defensively if enabled
+                if clone_tensors:
+                    call_kwargs = {k: _clone_tensor_if_needed(v) for k, v in call_kwargs.items()}
+
+                # Get module name for import in worker
+                module_name = cls.__module__
+
+                # Call worker using helper function that imports class fresh
+                if worker_config.python is None:
+                    # TorchMPWorker - use helper function
+                    result = worker.call(
+                        _call_method_in_worker,
+                        module_name,
+                        cls.__name__,
+                        func_name,
+                        self.__dict__.copy(),  # Pass instance state
+                        call_kwargs,
+                        timeout=timeout,
+                    )
+                else:
+                    # PersistentVenvWorker - call by module path
+                    result = worker.call_module(
+                        module=source_file.stem,
+                        func=func_name,
+                        timeout=timeout,
+                        **call_kwargs,
+                    )
+
+                # Clone result tensors defensively
+                if clone_tensors:
+                    result = _clone_tensor_if_needed(result)
+
+                elapsed = time.time() - start_time
+                if VERBOSE_LOGGING:
+                    result_desc = _describe_tensor(result) if not isinstance(result, tuple) else f"tuple({len(result)} items)"
+                    log_fn(f"← {cls.__name__}.{func_name} returned {result_desc} [{elapsed:.2f}s]")
+
+                return result
+
+            except Exception as e:
+                elapsed = time.time() - start_time
+                log_fn(f"✗ {cls.__name__}.{func_name} failed after {elapsed:.2f}s: {e}")
+                raise
+
+        # Store original method before replacing (for worker to access)
+        cls._isolated_original_method = original_method
+
+        # Replace method with proxy
         setattr(cls, func_name, proxy)
 
-        # Store metadata on class
+        # Store metadata
         cls._isolated_env = env
         cls._isolated_node_dir = node_dir
 
         return cls
 
     return decorator
-
-
-def _create_proxy_method(
-    env_name: str,
-    requirements: Optional[List[str]],
-    config_path: Optional[str],
-    python_version: str,
-    cuda_version: Optional[str],
-    method_name: str,
-    module_name: str,
-    class_name: str,
-    node_dir: Path,
-    node_package_dir: Path,
-    default_timeout: float,
-    log_callback: Optional[Callable],
-    original_method: Callable,
-    import_paths: Optional[List[str]] = None,
-) -> Callable:
-    """Create a proxy method that forwards calls to the isolated worker."""
-
-    log = log_callback or (lambda msg: print(f"[{env_name}] {msg}"))
-
-    @wraps(original_method)
-    def proxy(self, *args, timeout: Optional[float] = None, **kwargs):
-        # Get or create worker process with UDS transport
-        worker = _get_or_create_process(
-            env_name=env_name,
-            requirements=requirements,
-            config_path=config_path,
-            python_version=python_version,
-            cuda_version=cuda_version,
-            module_name=module_name,
-            class_name=class_name,
-            node_dir=node_dir,
-            node_package_dir=node_package_dir,
-            log_callback=log,
-            import_paths=import_paths,
-        )
-
-        # Handle positional arguments by binding to signature
-        sig = inspect.signature(original_method)
-        try:
-            bound = sig.bind(self, *args, **kwargs)
-            bound.apply_defaults()
-            call_kwargs = dict(bound.arguments)
-            del call_kwargs['self']
-        except TypeError:
-            call_kwargs = kwargs
-
-        # Serialize arguments
-        serialized_params = {}
-        for key, value in call_kwargs.items():
-            serialized_params[key] = encode_object(value)
-
-        # Build JSON-RPC request
-        import random
-        request_id = random.randint(1, 1000000)
-        request = {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "module": module_name,
-            "class": class_name,
-            "method": method_name,
-            "params": serialized_params,
-        }
-
-        # Send request via transport
-        try:
-            worker.transport.send(request)
-        except (ConnectionError, BrokenPipeError) as e:
-            _remove_process(env_name, node_package_dir)
-            raise RuntimeError(f"Worker connection lost: {e}")
-
-        # Read response with timeout
-        actual_timeout = timeout if timeout is not None else default_timeout
-
-        import select
-        ready, _, _ = select.select([worker.transport.fileno()], [], [], actual_timeout)
-
-        if not ready:
-            # Timeout - kill process and raise
-            worker.process.kill()
-            _remove_process(env_name, node_package_dir)
-            raise TimeoutError(f"Method {method_name} timed out after {actual_timeout}s")
-
-        try:
-            response = worker.transport.recv()
-        except ConnectionError:
-            _remove_process(env_name, node_package_dir)
-            raise RuntimeError(f"Worker process died unexpectedly")
-
-        # Check for error
-        if "error" in response:
-            error = response["error"]
-            error_msg = error.get("message", "Unknown error")
-            error_data = error.get("data", {})
-            tb = error_data.get("traceback", "")
-
-            # Re-raise as exception so ComfyUI can display it
-            raise RuntimeError(f"{error_msg}\n\nWorker traceback:\n{tb}")
-
-        # Deserialize result
-        result = response.get("result")
-        return decode_object(result)
-
-    return proxy
-
-
-def _get_or_create_process(
-    env_name: str,
-    requirements: Optional[List[str]],
-    config_path: Optional[str],
-    python_version: str,
-    cuda_version: Optional[str],
-    module_name: str,
-    class_name: str,
-    node_dir: Path,
-    node_package_dir: Path,
-    log_callback: Callable,
-    import_paths: Optional[List[str]] = None,
-) -> WorkerProcess:
-    """Get or create a worker process with Unix Domain Socket transport."""
-
-    cache_key = f"{env_name}:{node_package_dir}"
-
-    with _cache_lock:
-        if cache_key in _process_cache:
-            worker = _process_cache[cache_key]
-            if worker.process.poll() is None:  # Still running
-                return worker
-            else:
-                # Process died, clean up
-                cleanup_socket(worker.socket_path)
-                del _process_cache[cache_key]
-
-    # Ensure environment is set up
-    env_manager, env_config = _get_or_create_env(
-        env_name=env_name,
-        requirements=requirements,
-        config_path=config_path,
-        python_version=python_version,
-        cuda_version=cuda_version,
-        node_package_dir=node_package_dir,
-        log_callback=log_callback,
-    )
-
-    # Get Python executable from isolated env
-    python_exe = env_manager.get_python(env_config)
-
-    # Determine ComfyUI base directory
-    comfyui_base = None
-    if node_package_dir.parent.name == "custom_nodes":
-        comfyui_base = node_package_dir.parent.parent
-
-    # Build import paths string
-    import_paths_str = None
-    if import_paths:
-        import_paths_str = ",".join(import_paths)
-
-    # Create Unix Domain Socket for IPC
-    socket_path = get_socket_path(env_name)
-    cleanup_socket(socket_path)  # Remove any stale socket
-
-    # Create server socket
-    server_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server_socket.bind(socket_path)
-    server_socket.listen(1)
-    server_socket.settimeout(30)  # 30 second timeout for connection
-
-    # Build command to run the runner module with socket
-    cmd = [
-        str(python_exe),
-        "-m", "comfyui_isolation.runner",
-        "--node-dir", str(node_dir),
-        "--socket", socket_path,
-    ]
-
-    if comfyui_base:
-        cmd.extend(["--comfyui-base", str(comfyui_base)])
-
-    if import_paths_str:
-        cmd.extend(["--import-paths", import_paths_str])
-
-    log_callback(f"Starting worker process...")
-    log_callback(f"  Python: {python_exe}")
-    log_callback(f"  Socket: {socket_path}")
-
-    # Spawn subprocess (stderr only, no stdin/stdout for IPC)
-    process = subprocess.Popen(
-        cmd,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1,  # Line buffered
-        cwd=str(node_dir),
-    )
-
-    # Start stderr forwarding thread immediately
-    def forward_stderr():
-        for line in process.stderr:
-            log_callback(line.rstrip())
-
-    stderr_thread = threading.Thread(target=forward_stderr, daemon=True)
-    stderr_thread.start()
-
-    # Wait for worker to connect
-    try:
-        conn, _ = server_socket.accept()
-    except socket.timeout:
-        process.kill()
-        cleanup_socket(socket_path)
-        raise RuntimeError(f"Worker failed to connect (timeout after 30s)")
-
-    # Create transport from connected socket
-    transport = UnixSocketTransport(conn)
-
-    # Wait for ready signal via transport
-    try:
-        ready_msg = transport.recv()
-    except (ConnectionError, json.JSONDecodeError) as e:
-        process.kill()
-        cleanup_socket(socket_path)
-        raise RuntimeError(f"Worker failed to send ready signal: {e}")
-
-    if ready_msg.get("status") != "ready":
-        process.kill()
-        cleanup_socket(socket_path)
-        raise RuntimeError(f"Worker sent unexpected ready signal: {ready_msg}")
-
-    log_callback(f"Worker ready (UDS transport)")
-
-    # Create worker process holder
-    worker = WorkerProcess(
-        process=process,
-        transport=transport,
-        socket_path=socket_path,
-        server_socket=server_socket,
-    )
-
-    # Cache the worker
-    with _cache_lock:
-        _process_cache[cache_key] = worker
-
-    return worker
-
-
-def _remove_process(env_name: str, node_package_dir: Path):
-    """Remove a process from cache and clean up resources."""
-    cache_key = f"{env_name}:{node_package_dir}"
-    with _cache_lock:
-        if cache_key in _process_cache:
-            worker = _process_cache[cache_key]
-            try:
-                worker.transport.close()
-                worker.server_socket.close()
-                cleanup_socket(worker.socket_path)
-            except Exception:
-                pass
-            del _process_cache[cache_key]
-
-
-def _get_or_create_env(
-    env_name: str,
-    requirements: Optional[List[str]],
-    config_path: Optional[str],
-    python_version: str,
-    cuda_version: Optional[str],
-    node_package_dir: Path,
-    log_callback: Callable,
-) -> tuple:
-    """Get or create an environment manager and config.
-
-    Returns:
-        Tuple of (IsolatedEnvManager, IsolatedEnv)
-    """
-
-    cache_key = f"{env_name}:{node_package_dir}"
-
-    with _cache_lock:
-        if cache_key in _env_cache:
-            return _env_cache[cache_key]
-
-    # Auto-discover config file if not specified
-    resolved_config_path = config_path
-    if not resolved_config_path:
-        candidates = [
-            f"comfyui_isolation_reqs.toml",
-            f"comfyui_isolation_{env_name}.toml",
-            f"{env_name}_isolation.toml",
-            f"isolation.toml",
-        ]
-        for candidate in candidates:
-            if (node_package_dir / candidate).exists():
-                resolved_config_path = candidate
-                break
-
-    if resolved_config_path:
-        config_file = node_package_dir / resolved_config_path
-        if not config_file.exists():
-            raise FileNotFoundError(f"Config file not found: {config_file}")
-        env_config = load_env_from_file(config_file, node_package_dir)
-    else:
-        if requirements is None:
-            requirements = []
-
-        actual_cuda = cuda_version
-        if cuda_version == "auto":
-            from .env.detection import detect_cuda_version
-            actual_cuda = detect_cuda_version()
-
-        env_config = IsolatedEnv(
-            name=env_name,
-            python=python_version,
-            cuda=actual_cuda,
-            requirements=requirements,
-        )
-
-    # Create environment manager
-    env_manager = IsolatedEnvManager(base_dir=node_package_dir, log_callback=log_callback)
-
-    log_callback("=" * 50)
-    log_callback(f"Setting up isolated environment: {env_name}")
-    log_callback("=" * 50)
-
-    # Ensure environment is ready
-    if env_manager.is_ready(env_config):
-        log_callback("Environment already ready, skipping setup")
-    else:
-        log_callback("Creating isolated environment...")
-        env_manager.setup(env_config)
-
-    # Cache the manager and config together
-    result = (env_manager, env_config)
-    with _cache_lock:
-        _env_cache[cache_key] = result
-
-    return result
-
-
-def shutdown_all_processes():
-    """Shutdown all cached worker processes."""
-    with _cache_lock:
-        for worker in _process_cache.values():
-            try:
-                # Send shutdown command via transport
-                shutdown_req = {"jsonrpc": "2.0", "id": 0, "method": "shutdown"}
-                worker.transport.send(shutdown_req)
-                worker.process.wait(timeout=5)
-            except Exception:
-                worker.process.kill()
-            finally:
-                # Clean up resources
-                try:
-                    worker.transport.close()
-                    worker.server_socket.close()
-                    cleanup_socket(worker.socket_path)
-                except Exception:
-                    pass
-        _process_cache.clear()
-
-
-# Register cleanup on module unload
-import atexit
-atexit.register(shutdown_all_processes)
