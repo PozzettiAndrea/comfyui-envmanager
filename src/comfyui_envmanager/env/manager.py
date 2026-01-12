@@ -19,6 +19,8 @@ from .security import (
     validate_path_within_root,
     validate_wheel_url,
 )
+from ..registry import PACKAGE_REGISTRY, is_registered, get_cuda_short2
+from ..resolver import RuntimeEnv, parse_wheel_requirement
 
 
 class IsolatedEnvManager:
@@ -285,15 +287,10 @@ class IsolatedEnvManager:
                 raise RuntimeError(f"Failed to install requirements: {result.stderr}")
 
         # Install no-deps requirements first (e.g., CUDA extensions with conflicting metadata)
+        # For packages in registry, resolve proper wheel URLs
         if env.no_deps_requirements:
-            self.log(f"Installing {len(env.no_deps_requirements)} packages (--no-deps)")
-            result = subprocess.run(
-                pip_args + ["--no-deps"] + env.no_deps_requirements,
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode != 0:
-                raise RuntimeError(f"Failed to install no-deps packages: {result.stderr}")
+            self.log(f"Installing {len(env.no_deps_requirements)} CUDA packages")
+            self._install_cuda_packages(env, pip_args)
 
         # Install individual requirements
         if env.requirements:
@@ -307,6 +304,134 @@ class IsolatedEnvManager:
                 raise RuntimeError(f"Failed to install packages: {result.stderr}")
 
         self.log("Requirements installed successfully")
+
+    def _install_cuda_packages(self, env: IsolatedEnv, pip_args: list) -> None:
+        """Install CUDA packages using registry-based wheel resolution."""
+        # Build RuntimeEnv from IsolatedEnv config
+        runtime_env = RuntimeEnv(
+            cuda_version=env.cuda,
+            torch_version=env.pytorch_version,
+            python_version=env.python,
+            platform=self.platform.name,
+        )
+        vars_dict = runtime_env.as_dict()
+        if env.cuda:
+            vars_dict["cuda_short2"] = get_cuda_short2(env.cuda)
+
+        for req in env.no_deps_requirements:
+            package, version = parse_wheel_requirement(req)
+            pkg_lower = package.lower()
+
+            if pkg_lower in PACKAGE_REGISTRY:
+                config = PACKAGE_REGISTRY[pkg_lower]
+                method = config["method"]
+                self.log(f"  Installing {package} ({method})...")
+
+                if method == "index":
+                    # PEP 503 index - use --extra-index-url
+                    index_url = self._substitute_template(config["index_url"], vars_dict)
+                    pkg_spec = f"{package}=={version}" if version else package
+                    result = subprocess.run(
+                        pip_args + ["--extra-index-url", index_url, "--no-deps", pkg_spec],
+                        capture_output=True, text=True,
+                    )
+
+                elif method in ("github_index", "find_links"):
+                    # GitHub Pages or generic find-links
+                    index_url = self._substitute_template(config["index_url"], vars_dict)
+                    pkg_spec = f"{package}=={version}" if version else package
+                    result = subprocess.run(
+                        pip_args + ["--find-links", index_url, "--no-deps", pkg_spec],
+                        capture_output=True, text=True,
+                    )
+
+                elif method == "pypi_variant":
+                    # Transform package name based on CUDA version
+                    actual_package = self._substitute_template(config["package_template"], vars_dict)
+                    pkg_spec = f"{actual_package}=={version}" if version else actual_package
+                    self.log(f"    -> {actual_package}")
+                    result = subprocess.run(
+                        pip_args + ["--no-deps", pkg_spec],
+                        capture_output=True, text=True,
+                    )
+
+                elif method == "github_release":
+                    # Direct wheel URL from GitHub releases
+                    result = self._install_from_github_release(
+                        package, version, vars_dict, config, pip_args
+                    )
+                    continue  # Already handled
+
+                else:
+                    # Unknown method - try regular install
+                    self.log(f"    Unknown method '{method}', trying regular install")
+                    pkg_spec = f"{package}=={version}" if version else package
+                    result = subprocess.run(
+                        pip_args + ["--no-deps", pkg_spec],
+                        capture_output=True, text=True,
+                    )
+
+                if result.returncode != 0:
+                    raise RuntimeError(f"Failed to install {package}: {result.stderr}")
+            else:
+                # Not in registry - try regular pip install (e.g., spconv-cu126)
+                self.log(f"  Installing {package} (PyPI)...")
+                pkg_spec = f"{package}=={version}" if version else package
+                result = subprocess.run(
+                    pip_args + ["--no-deps", pkg_spec],
+                    capture_output=True, text=True,
+                )
+                if result.returncode != 0:
+                    raise RuntimeError(f"Failed to install {package}: {result.stderr}")
+
+    def _install_from_github_release(
+        self,
+        package: str,
+        version: str,
+        vars_dict: dict,
+        config: dict,
+        pip_args: list,
+    ) -> None:
+        """Install package from GitHub release wheels with fallback sources."""
+        import platform as plat
+        current_platform = f"{plat.system().lower()}_{plat.machine().lower()}"
+
+        sources = config.get("sources", [])
+        errors = []
+
+        for source in sources:
+            # Check platform compatibility
+            platforms = source.get("platforms", [])
+            if platforms and not any(p in current_platform for p in platforms):
+                continue
+
+            url_template = source["url_template"]
+            url = self._substitute_template(url_template, vars_dict)
+
+            self.log(f"    Trying {source.get('name', 'unknown')}: {url[:80]}...")
+            result = subprocess.run(
+                pip_args + ["--no-deps", url],
+                capture_output=True, text=True,
+            )
+
+            if result.returncode == 0:
+                return  # Success!
+
+            errors.append(f"{source.get('name', 'unknown')}: {result.stderr[:100]}")
+
+        # All sources failed
+        raise RuntimeError(
+            f"Failed to install {package}=={version} from any source:\n"
+            + "\n".join(errors)
+        )
+
+    def _substitute_template(self, template: str, vars_dict: dict) -> str:
+        """Substitute template variables with environment values."""
+        result = template
+        for key, value in vars_dict.items():
+            if value is not None:
+                result = result.replace(f"{{{key}}}", str(value))
+        return result
 
     def _install_comfyui_envmanager(self, env: IsolatedEnv) -> None:
         """Install comfyui-envmanager package (needed for BaseWorker)."""
