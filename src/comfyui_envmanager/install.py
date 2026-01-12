@@ -292,13 +292,15 @@ def _install_cuda_package(
         )
 
 
-def _substitute_template(template: str, env: RuntimeEnv) -> str:
+def _substitute_template(template: str, env_or_dict: Union[RuntimeEnv, Dict[str, str]]) -> str:
     """Substitute template variables with runtime environment values."""
-    vars_dict = env.as_dict()
-
-    # Add py_minor for pytorch3d URL pattern
-    if env.python_version:
-        vars_dict["py_minor"] = env.python_version.split(".")[-1]
+    if isinstance(env_or_dict, dict):
+        vars_dict = env_or_dict.copy()
+    else:
+        vars_dict = env_or_dict.as_dict()
+        # Add py_minor for pytorch3d URL pattern
+        if env_or_dict.python_version:
+            vars_dict["py_minor"] = env_or_dict.python_version.split(".")[-1]
 
     result = template
     for key, value in vars_dict.items():
