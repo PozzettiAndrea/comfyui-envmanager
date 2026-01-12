@@ -50,12 +50,11 @@ def _serialize_for_ipc(obj, visited=None):
     objects to a serializable dict format.
     """
     if visited is None:
-        visited = set()
+        visited = {}  # Maps id -> serialized result
 
     obj_id = id(obj)
     if obj_id in visited:
-        return obj
-    visited.add(obj_id)
+        return visited[obj_id]  # Return cached serialized result
 
     # Check if this is a custom object with broken module path
     if (hasattr(obj, '__dict__') and
@@ -66,23 +65,42 @@ def _serialize_for_ipc(obj, visited=None):
         cls = obj.__class__
         module = getattr(cls, '__module__', '')
 
-        # Check if module looks like a file path (contains / or \)
-        if '/' in module or '\\' in module:
-            # Convert to serializable dict
-            return {
+        # Check if module looks like a file path or is problematic for pickling
+        # This catches: file paths, custom_nodes imports, and modules starting with /
+        is_problematic = (
+            '/' in module or
+            '\\' in module or
+            module.startswith('/') or
+            'custom_nodes' in module or
+            module == '' or
+            module == '__main__'
+        )
+        if is_problematic:
+            # Convert to serializable dict and cache it
+            result = {
                 '__isolated_object__': True,
                 '__class_name__': cls.__name__,
                 '__attrs__': {k: _serialize_for_ipc(v, visited) for k, v in obj.__dict__.items()},
             }
+            visited[obj_id] = result
+            return result
 
     # Recurse into containers
     if isinstance(obj, dict):
-        return {k: _serialize_for_ipc(v, visited) for k, v in obj.items()}
+        result = {k: _serialize_for_ipc(v, visited) for k, v in obj.items()}
+        visited[obj_id] = result
+        return result
     elif isinstance(obj, list):
-        return [_serialize_for_ipc(v, visited) for v in obj]
+        result = [_serialize_for_ipc(v, visited) for v in obj]
+        visited[obj_id] = result
+        return result
     elif isinstance(obj, tuple):
-        return tuple(_serialize_for_ipc(v, visited) for v in obj)
+        result = tuple(_serialize_for_ipc(v, visited) for v in obj)
+        visited[obj_id] = result
+        return result
 
+    # Primitives and other objects - cache and return as-is
+    visited[obj_id] = obj
     return obj
 
 
