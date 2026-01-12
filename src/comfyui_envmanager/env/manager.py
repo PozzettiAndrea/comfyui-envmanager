@@ -464,6 +464,7 @@ class IsolatedEnvManager:
         self.log("Installing comfyui-envmanager (for worker support)...")
         result = subprocess.run(
             [str(uv), "pip", "install", "--python", str(python_exe),
+             "--upgrade", "--no-cache",
              "comfyui-envmanager @ git+https://github.com/PozzettiAndrea/comfyui-envmanager"],
             capture_output=True,
             text=True,
