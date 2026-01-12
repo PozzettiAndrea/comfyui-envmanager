@@ -214,7 +214,7 @@ def _get_install_info(
     elif legacy_wheel_sources:
         return {"method": "legacy", "description": f"from config wheel_sources"}
     else:
-        return {"method": "unknown", "description": "NOT IN REGISTRY - will fail"}
+        return {"method": "pypi", "description": "from PyPI"}
 
 
 def _install_cuda_package(
@@ -289,16 +289,10 @@ def _install_cuda_package(
                     reason="Not found in any wheel source",
                 )
     else:
-        # Package not in registry and no legacy sources
-        raise WheelNotFoundError(
-            package=package,
-            version=version,
-            env=env,
-            tried_urls=[],
-            reason=f"Package '{package}' not in registry. "
-                   f"Known packages: {', '.join(sorted(PACKAGE_REGISTRY.keys()))}. "
-                   f"Add [sources] wheel_sources to config for custom packages.",
-        )
+        # Package not in registry - try regular pip install (e.g., spconv-cu126)
+        log(f"  Installing {package} from PyPI...")
+        pkg_spec = f"{package}=={version}" if version else package
+        _pip_install([pkg_spec], no_deps=False, log=log)
 
 
 def _substitute_template(template: str, env_or_dict: Union[RuntimeEnv, Dict[str, str]]) -> str:

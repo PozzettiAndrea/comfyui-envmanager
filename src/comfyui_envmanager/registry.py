@@ -124,12 +124,13 @@ PACKAGE_REGISTRY: Dict[str, Dict[str, Any]] = {
 
     # =========================================================================
     # spconv - PyPI with CUDA-versioned package names
-    # Package names: spconv-cu118, spconv-cu121, spconv-cu124
+    # Package names: spconv-cu118, spconv-cu120, spconv-cu121, spconv-cu124, spconv-cu126
+    # Note: Max available is cu126 as of Jan 2026, use explicit spconv-cu126 in config
     # =========================================================================
     "spconv": {
         "method": "pypi_variant",
         "package_template": "spconv-cu{cuda_short2}",
-        "description": "Sparse convolution library",
+        "description": "Sparse convolution library (use spconv-cu126 for CUDA 12.6+)",
     },
 }
 
