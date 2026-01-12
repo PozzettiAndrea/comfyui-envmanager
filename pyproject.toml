@@ -1,14 +1,14 @@
 [project]
-name = "comfyui-isolation"
-version = "0.2.2"
-description = "Process isolation for ComfyUI custom nodes"
+name = "comfyui-envmanager"
+version = "0.0.1"
+description = "Environment management for ComfyUI custom nodes - CUDA wheel resolution and process isolation"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
 authors = [
     {name = "Andrea Pozzetti"}
 ]
-keywords = ["comfyui", "isolation", "venv", "process", "subprocess"]
+keywords = ["comfyui", "cuda", "wheels", "environment", "isolation", "venv", "process"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -26,16 +26,19 @@ dependencies = [
 dev = ["pytest", "ruff", "mypy"]
 
 [project.urls]
-Homepage = "https://github.com/PozzettiAndrea/comfyui-isolation"
-Repository = "https://github.com/PozzettiAndrea/comfyui-isolation"
-Issues = "https://github.com/PozzettiAndrea/comfyui-isolation/issues"
+Homepage = "https://github.com/PozzettiAndrea/comfyui-envmanager"
+Repository = "https://github.com/PozzettiAndrea/comfyui-envmanager"
+Issues = "https://github.com/PozzettiAndrea/comfyui-envmanager/issues"
+
+[project.scripts]
+comfy-env = "comfyui_envmanager.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/comfyui_isolation"]
+packages = ["src/comfyui_envmanager"]
 
 [tool.ruff]
 line-length = 100

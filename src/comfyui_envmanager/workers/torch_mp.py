@@ -30,7 +30,7 @@ from typing import Any, Callable, Optional
 
 from .base import Worker, WorkerError
 
-logger = logging.getLogger("comfyui_isolation")
+logger = logging.getLogger("comfyui_envmanager")
 
 
 # Sentinel value for shutdown

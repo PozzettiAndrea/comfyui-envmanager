@@ -13,7 +13,7 @@ Architecture:
     the decorator is a transparent no-op.
 
 Example:
-    from comfyui_isolation import isolated
+    from comfyui_envmanager import isolated
 
     @isolated(env="myenv")
     class MyNode:
@@ -43,7 +43,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
-logger = logging.getLogger("comfyui_isolation")
+logger = logging.getLogger("comfyui_envmanager")
 
 # Enable verbose logging by default (can be disabled)
 VERBOSE_LOGGING = os.environ.get("COMFYUI_ISOLATION_QUIET", "0") != "1"
@@ -206,7 +206,7 @@ def isolated(
     Python environment. Tensors are transferred efficiently via PyTorch's
     native IPC mechanisms (CUDA IPC for GPU, shared memory for CPU).
 
-    By default, auto-discovers config file (comfyui_isolation_reqs.toml) and
+    By default, auto-discovers config file (comfyui_envmanager_reqs.toml) and
     uses full venv isolation with PersistentVenvWorker. Use same_venv=True
     for lightweight same-venv isolation with TorchMPWorker.
 
@@ -224,7 +224,7 @@ def isolated(
                    If False (default), use full venv isolation with auto-discovered config.
 
     Example:
-        # Full venv isolation (default) - auto-discovers comfyui_isolation_reqs.toml
+        # Full venv isolation (default) - auto-discovers comfyui_envmanager_reqs.toml
         @isolated(env="sam3d")
         class MyNode:
             FUNCTION = "process"

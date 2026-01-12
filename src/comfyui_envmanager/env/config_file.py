@@ -4,7 +4,7 @@ This module provides declarative configuration for isolated environments,
 allowing custom nodes to define their requirements in a TOML file instead
 of programmatically.
 
-Example config file (comfyui_isolation_reqs.toml):
+Example config file (comfyui_env.toml):
 
     [env]
     name = "my-node"
@@ -52,9 +52,11 @@ from .detection import detect_cuda_version
 
 # Standard file names to search for (in order of priority)
 CONFIG_FILE_NAMES = [
-    "comfyui_isolation_reqs.toml",
-    "comfyui_isolation.toml",
-    "isolation.toml",
+    "comfyui_env.toml",           # New canonical name
+    "comfyui_envmanager.toml",    # Alternative
+    "comfyui_isolation_reqs.toml", # Legacy (backward compat)
+    "comfyui_isolation.toml",      # Legacy (backward compat)
+    "isolation.toml",              # Legacy (backward compat)
 ]
 
 

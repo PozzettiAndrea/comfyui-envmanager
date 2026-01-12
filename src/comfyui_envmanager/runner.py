@@ -5,14 +5,14 @@ This module is the entry point for subprocess execution. The runner handles
 requests for ANY @isolated class in the environment, importing classes on demand.
 
 Usage (Unix Domain Socket - recommended):
-    python -m comfyui_isolation.runner \
+    python -m comfyui_envmanager.runner \
         --node-dir /path/to/ComfyUI-SAM3DObjects/nodes \
         --comfyui-base /path/to/ComfyUI \
         --import-paths ".,../vendor" \
         --socket /tmp/comfyui-isolation-myenv-12345.sock
 
 Usage (Legacy stdin/stdout):
-    python -m comfyui_isolation.runner \
+    python -m comfyui_envmanager.runner \
         --node-dir /path/to/ComfyUI-SAM3DObjects/nodes \
         --comfyui-base /path/to/ComfyUI \
         --import-paths ".,../vendor"
@@ -72,13 +72,13 @@ def setup_paths(node_dir: str, comfyui_base: Optional[str], import_paths: Option
 
 def serialize_result(obj: Any) -> Any:
     """Serialize result for JSON transport."""
-    from comfyui_isolation.ipc.protocol import encode_object
+    from comfyui_envmanager.ipc.protocol import encode_object
     return encode_object(obj)
 
 
 def deserialize_arg(obj: Any) -> Any:
     """Deserialize argument from JSON transport."""
-    from comfyui_isolation.ipc.protocol import decode_object
+    from comfyui_envmanager.ipc.protocol import decode_object
     return decode_object(obj)
 
 
@@ -122,7 +122,7 @@ def run_worker(
         import_paths: Comma-separated import paths
         socket_path: Unix domain socket path (if None, uses stdin/stdout)
     """
-    from comfyui_isolation.ipc.transport import UnixSocketTransport, StdioTransport
+    from comfyui_envmanager.ipc.transport import UnixSocketTransport, StdioTransport
 
     # Setup paths first
     setup_paths(node_dir, comfyui_base, import_paths)

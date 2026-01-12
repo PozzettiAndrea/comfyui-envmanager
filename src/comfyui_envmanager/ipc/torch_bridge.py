@@ -142,7 +142,7 @@ class TorchWorker:
     torch.multiprocessing.Queue which enables zero-copy CUDA tensor sharing.
 
     Example:
-        from comfyui_isolation import TorchWorker, register
+        from comfyui_envmanager import TorchWorker, register
 
         class MyWorker(TorchWorker):
             def setup(self):
@@ -192,7 +192,7 @@ class TorchBridge:
     - Worker must be a TorchWorker subclass
 
     Example:
-        from comfyui_isolation import TorchBridge, TorchWorker, register
+        from comfyui_envmanager import TorchBridge, TorchWorker, register
         from pathlib import Path
 
         # In your node:

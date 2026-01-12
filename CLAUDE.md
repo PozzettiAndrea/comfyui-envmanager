@@ -4,51 +4,56 @@ This file provides guidance to Claude Code when working with this repository.
 
 ## Project Overview
 
-**comfyui-isolation** is a Python library that enables ComfyUI custom nodes to run in isolated subprocess environments with separate Python virtual environments and dependencies. It solves dependency conflicts between nodes by running each node's GPU-heavy code in a separate process with its own venv.
+**comfyui-envmanager** is a Python library for ComfyUI custom nodes that provides:
+
+1. **CUDA Wheel Resolution** - Deterministic wheel URL construction for CUDA packages (nvdiffrast, pytorch3d, etc.)
+2. **In-Place Installation** - Install CUDA wheels into current environment without compile
+3. **Process Isolation** - Run nodes in separate venvs with different dependencies
+
+This replaces the old `comfyui-isolation` package (version 0.0.1 is a fresh start).
 
 ## Architecture
 
+### Type 1 Nodes (Isolated Venv)
+Nodes that need separate venv due to conflicting dependencies:
 ```
 ComfyUI Main Process                    Isolated Subprocess
 ┌─────────────────────────┐            ┌──────────────────────────┐
 │  @isolated decorator    │            │  runner.py entrypoint    │
-│  intercepts FUNCTION    │            │                          │
-│  method calls           │   stdin    │  Imports node module     │
-│                         │ ─────────► │  (decorator is no-op)    │
-│  Serializes args to     │   JSON     │                          │
-│  JSON + base64          │            │  Calls actual method     │
-│                         │   stdout   │                          │
-│  Deserializes result    │ ◄───────── │  Returns JSON result     │
-│  from JSON              │   JSON     │                          │
+│  intercepts FUNCTION    │   UDS/     │                          │
+│  method calls           │  stdin ──► │  Imports node module     │
+│                         │            │  (decorator is no-op)    │
+│  Tensor IPC via shared  │            │                          │
+│  memory / CUDA IPC      │ ◄──────────│  Returns result          │
 └─────────────────────────┘            └──────────────────────────┘
 ```
 
-### Key Components
+### Type 2 Nodes (In-Place)
+Nodes that just need CUDA wheels resolved:
+```
+comfyui_env.toml
+       │
+       ▼
+┌──────────────────────────────────────────────┐
+│  WheelResolver                               │
+│  - Detects CUDA/PyTorch/Python versions      │
+│  - Constructs exact wheel URLs               │
+│  - pip install --no-deps                     │
+└──────────────────────────────────────────────┘
+```
 
-- **`decorator.py`** - The `@isolated` decorator that intercepts method calls in host process
-- **`runner.py`** - Generic subprocess entrypoint that handles JSON-RPC requests
-- **`ipc/protocol.py`** - Serialization/deserialization for tensors, images, and complex objects
-- **`env/manager.py`** - Virtual environment creation and package installation using `uv`
-- **`env/config.py`** - Environment configuration dataclass
-- **`stubs/folder_paths.py`** - Stub for ComfyUI's folder_paths module in subprocess
+## Key Components
 
-### How It Works
-
-1. **Host Process**: When a node class is decorated with `@isolated`, the decorator:
-   - Checks if running in worker mode (`COMFYUI_ISOLATION_WORKER=1`) - if so, becomes a no-op
-   - Otherwise, replaces the FUNCTION method with a proxy that forwards calls to subprocess
-
-2. **Subprocess Lifecycle**:
-   - First call spawns a subprocess running `runner.py`
-   - Subprocess sets up sys.path, imports the node module
-   - Node's `@isolated` decorator is a no-op in subprocess (due to env var)
-   - Subprocess sends "ready" signal, then processes JSON-RPC requests
-
-3. **IPC Protocol**:
-   - Requests/responses are JSON over stdin/stdout
-   - Tensors: converted to numpy, pickled, base64 encoded
-   - Images (PIL): PNG encoded, base64
-   - Complex objects: pickle + base64 fallback
+| File | Purpose |
+|------|---------|
+| `src/comfyui_envmanager/install.py` | `install()` function for both modes |
+| `src/comfyui_envmanager/resolver.py` | Wheel URL resolution with template expansion |
+| `src/comfyui_envmanager/errors.py` | Rich, actionable error messages |
+| `src/comfyui_envmanager/cli.py` | `comfy-env` CLI commands |
+| `src/comfyui_envmanager/decorator.py` | `@isolated` decorator for process isolation |
+| `src/comfyui_envmanager/workers/` | Worker classes (TorchMPWorker, VenvWorker) |
+| `src/comfyui_envmanager/env/manager.py` | venv creation with `uv` |
+| `src/comfyui_envmanager/env/config_file.py` | TOML config parsing |
 
 ## Development Commands
 
@@ -57,48 +62,76 @@ ComfyUI Main Process                    Isolated Subprocess
 cd /home/shadeform/comfyui-isolation
 pip install -e .
 
-# Run tests
-pytest
-
-# The library is used by ComfyUI-SAM3DObjects at:
-# /home/shadeform/sam3dobjects/ComfyUI/custom_nodes/ComfyUI-SAM3DObjects/
+# Run CLI
+comfy-env info
+comfy-env install --dry-run
+comfy-env resolve nvdiffrast==0.4.0
 ```
 
-## Key Files
+## Usage Patterns
 
-| File | Purpose |
-|------|---------|
-| `src/comfyui_isolation/decorator.py` | Main `@isolated` decorator and process management |
-| `src/comfyui_isolation/runner.py` | Subprocess entrypoint, handles JSON-RPC |
-| `src/comfyui_isolation/ipc/protocol.py` | Tensor/image serialization |
-| `src/comfyui_isolation/env/manager.py` | venv creation with `uv` |
-| `src/comfyui_isolation/env/config.py` | `IsolatedEnv` configuration dataclass |
-
-## Usage Pattern
-
+### In-Place Installation (Type 2)
 ```python
-from comfyui_isolation import isolated
+from comfyui_envmanager import install
 
-@isolated(env="myenv", import_paths=[".", "../vendor"])
+# Auto-discover config and install
+install()
+
+# Dry run
+install(dry_run=True)
+```
+
+### Process Isolation (Type 1)
+```python
+from comfyui_envmanager import isolated
+
+@isolated(env="myenv")
 class MyGPUNode:
     FUNCTION = "process"
     RETURN_TYPES = ("IMAGE",)
 
     def process(self, image):
-        # This runs in isolated subprocess
-        import torch
-        import my_heavy_dependency
+        # Runs in isolated subprocess
+        import heavy_dependency
         return (result,)
 ```
 
-## Known Issues & Recent Fixes
+### Direct Worker Usage
+```python
+from comfyui_envmanager import TorchMPWorker
 
-1. **C Library stdout pollution**: Libraries like `pymeshfix` print directly to fd 1, corrupting JSON protocol. Fixed by redirecting stdout to stderr at file descriptor level during method execution (see `runner.py` lines 178-193).
+worker = TorchMPWorker()
+result = worker.call(my_function, image=tensor)
+```
 
-2. **Tensor serialization overhead**: Currently copies tensors CPU→numpy→pickle→base64. See CRITICISM.md for planned improvements using CUDA IPC.
+## Config File Format
+
+```toml
+[env]
+name = "my-node"
+python = "3.10"
+cuda = "auto"
+
+[packages]
+requirements = ["transformers>=4.56"]
+no_deps = ["nvdiffrast==0.4.0"]
+
+[sources]
+wheel_sources = ["https://github.com/.../releases/download/"]
+```
+
+## Key Design Decisions
+
+1. **Deterministic Resolution**: Wheel URLs are constructed, not solved. If URL 404s, fail fast with clear message.
+
+2. **No Compilation on User Machines**: If wheel doesn't exist, fail with actionable error showing what combos are available.
+
+3. **Template Variables**: `{cuda_short}`, `{torch_mm}`, `{py_short}`, `{platform}` for URL construction.
+
+4. **Backward Compatibility**: Old config file names (`comfyui_isolation_reqs.toml`) still discovered.
 
 ## Related Projects
 
-- **pyisolate** (`/home/shadeform/pyisolate`) - ComfyUI's official isolation library, uses multiprocessing.Queue and CUDA IPC for zero-copy tensor sharing. See CRITICISM.md for detailed comparison.
-
-- **ComfyUI-SAM3DObjects** - Primary user of this library for 3D object generation nodes.
+- **pyisolate** - ComfyUI's official security-focused isolation
+- **comfy-cli** - High-level ComfyUI management
+- **ComfyUI-SAM3DObjects** - Primary user of this library

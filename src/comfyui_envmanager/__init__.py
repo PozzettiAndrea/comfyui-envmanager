@@ -1,39 +1,46 @@
 """
-comfyui-isolation: Process isolation for ComfyUI custom nodes.
+comfyui-envmanager: Environment management for ComfyUI custom nodes.
 
-This package provides simple, explicit process isolation for ComfyUI nodes.
+This package provides:
+- CUDA wheel resolution and in-place installation (Type 2 nodes)
+- Process isolation with separate venvs (Type 1 nodes)
 
-## Quick Start (Recommended API)
+## Quick Start - In-Place Installation
 
-    from comfyui_isolation.workers import get_worker, TorchMPWorker
+    from comfyui_envmanager import install
+
+    # Auto-discover config and install CUDA wheels
+    install()
+
+    # Or with explicit config
+    install(config="comfyui_env.toml")
+
+## Quick Start - Process Isolation
+
+    from comfyui_envmanager.workers import get_worker, TorchMPWorker
 
     # Same-venv isolation (zero-copy tensors)
     worker = TorchMPWorker()
     result = worker.call(my_gpu_function, image=tensor)
 
     # Cross-venv isolation
-    from comfyui_isolation.workers import PersistentVenvWorker
+    from comfyui_envmanager.workers import PersistentVenvWorker
     worker = PersistentVenvWorker(python="/path/to/venv/bin/python")
     result = worker.call_module("my_module", "my_func", image=tensor)
 
-## Named Worker Pool
+## CLI
 
-    from comfyui_isolation.workers import register_worker, get_worker
-
-    # Register at startup
-    register_worker("sam3d", factory=lambda: PersistentVenvWorker(...))
-
-    # Use anywhere
-    worker = get_worker("sam3d")
-    result = worker.call_module("my_module", "process", image=tensor)
+    comfy-env install          # Install from config
+    comfy-env info             # Show environment info
+    comfy-env resolve pkg==1.0 # Show resolved wheel URL
+    comfy-env doctor           # Verify installation
 
 ## Legacy APIs (still supported)
 
-The @isolated decorator and WorkerBridge are still available but the
-workers module above is simpler and more explicit.
+The @isolated decorator and WorkerBridge are still available.
 """
 
-__version__ = "0.2.1"
+__version__ = "0.0.1"
 
 from .env.config import IsolatedEnv
 from .env.config_file import (
@@ -53,6 +60,18 @@ from .env.security import (
 from .ipc.bridge import WorkerBridge
 from .ipc.worker import BaseWorker, register
 from .decorator import isolated, shutdown_all_processes
+
+# New in-place installation API
+from .install import install, verify_installation
+from .resolver import RuntimeEnv, WheelResolver
+from .errors import (
+    EnvManagerError,
+    ConfigError,
+    WheelNotFoundError,
+    DependencyError,
+    CUDANotFoundError,
+    InstallError,
+)
 
 # New workers module (recommended API)
 from .workers import (
@@ -80,7 +99,19 @@ except ImportError:
     _PERSISTENT_AVAILABLE = False
 
 __all__ = [
-    # NEW: Simple workers API (recommended)
+    # NEW: In-place installation API
+    "install",
+    "verify_installation",
+    "RuntimeEnv",
+    "WheelResolver",
+    # Errors
+    "EnvManagerError",
+    "ConfigError",
+    "WheelNotFoundError",
+    "DependencyError",
+    "CUDANotFoundError",
+    "InstallError",
+    # Workers API (recommended for isolation)
     "Worker",
     "TorchMPWorker",
     "VenvWorker",

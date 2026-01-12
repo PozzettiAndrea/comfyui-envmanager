@@ -1,26 +1,29 @@
-# comfyui-isolation
+# comfyui-envmanager
 
-Process isolation for ComfyUI custom nodes. Run your node's inference code in a separate Python environment with its own dependencies.
+Environment management for ComfyUI custom nodes. Provides:
+
+1. **CUDA Wheel Resolution** - Install pre-built CUDA wheels (nvdiffrast, pytorch3d) without compilation
+2. **Process Isolation** - Run nodes in separate Python environments with their own dependencies
 
 ## Why?
 
-ComfyUI custom nodes often require conflicting dependencies:
+ComfyUI custom nodes face two challenges:
+
+**Type 1: Dependency Conflicts**
 - Node A needs `torch==2.1.0` with CUDA 11.8
 - Node B needs `torch==2.8.0` with CUDA 12.8
-- Both want different versions of `numpy`, `transformers`, etc.
 
-This package lets each node run in its own isolated Python environment, completely avoiding dependency conflicts.
+**Type 2: CUDA Package Installation**
+- Users don't have compilers installed
+- Building from source takes forever
+- pip install fails with cryptic errors
+
+This package solves both problems.
 
 ## Installation
 
 ```bash
-pip install comfyui-isolation
-```
-
-Or install from source:
-
-```bash
-pip install -e .
+pip install comfyui-envmanager
 ```
 
 Requires [uv](https://github.com/astral-sh/uv) for fast environment creation:
@@ -31,142 +34,181 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ## Quick Start
 
-### 1. Define your environment
+### In-Place Installation (Type 2 - CUDA Wheels)
 
-```python
-from comfyui_isolation import IsolatedEnv
+Create a `comfyui_env.toml` in your node directory:
 
-env = IsolatedEnv(
-    name="my-node",
-    python="3.10",
-    cuda="12.8",  # or None for auto-detect
-    requirements=["torch==2.8.0", "nvdiffrast"],
-    wheel_sources=["https://my-wheels.github.io/"],
-)
+```toml
+[env]
+name = "my-node"
+python = "3.10"
+cuda = "auto"
+
+[packages]
+requirements = ["transformers>=4.56", "pillow"]
+no_deps = ["nvdiffrast==0.4.0", "pytorch3d>=0.7.8"]
+
+[sources]
+wheel_sources = ["https://github.com/PozzettiAndrea/nvdiffrast-full-wheels/releases/download/"]
 ```
 
-### 2. Create a worker script
+Then in your `__init__.py`:
 
 ```python
-# worker.py
-from comfyui_isolation import BaseWorker, register
+from comfyui_envmanager import install
 
-class MyWorker(BaseWorker):
-    def setup(self):
-        # Load your model here (runs once)
-        import torch
-        self.model = load_my_model()
-
-    @register("process")
-    def process_image(self, image, params):
-        return self.model(image, **params)
-
-if __name__ == "__main__":
-    MyWorker().run()
+# Install CUDA wheels into current environment
+install()
 ```
 
-### 3. Use in your node
+### Process Isolation (Type 1 - Separate Venv)
+
+For nodes that need completely separate dependencies:
 
 ```python
-from pathlib import Path
-from comfyui_isolation import IsolatedEnv, WorkerBridge
+from comfyui_envmanager import isolated
 
-env = IsolatedEnv(name="my-node", python="3.10", cuda="12.8")
-bridge = WorkerBridge(env, worker_script=Path("worker.py"))
+@isolated(env="my-node")
+class MyNode:
+    FUNCTION = "process"
+    RETURN_TYPES = ("IMAGE",)
 
-# First call creates the environment (cached for next time)
-result = bridge.call("process", image=my_image, params={"size": 512})
+    def process(self, image):
+        # Runs in isolated subprocess with its own venv
+        import conflicting_package
+        return (result,)
 ```
+
+## CLI
+
+```bash
+# Show detected environment
+comfy-env info
+
+# Install from config
+comfy-env install
+
+# Dry run (show what would be installed)
+comfy-env install --dry-run
+
+# Resolve wheel URLs without installing
+comfy-env resolve nvdiffrast==0.4.0
+
+# Verify installation
+comfy-env doctor
+```
+
+## Configuration
+
+### comfyui_env.toml
+
+```toml
+[env]
+name = "my-node"          # Unique name for caching
+python = "3.10"           # Python version
+cuda = "auto"             # "auto", "12.8", "12.4", or null
+
+[packages]
+requirements = [          # Regular pip packages
+    "transformers>=4.56",
+    "pillow",
+]
+no_deps = [               # CUDA packages (installed with --no-deps)
+    "nvdiffrast==0.4.0",
+    "pytorch3d>=0.7.8",
+]
+
+[sources]
+wheel_sources = [         # GitHub releases with pre-built wheels
+    "https://github.com/.../releases/download/",
+]
+index_urls = [            # Extra pip index URLs
+    "https://pypi.org/simple/",
+]
+
+[worker]                  # For isolation mode
+package = "worker"        # worker/__main__.py
+```
+
+### Template Variables
+
+Wheel URLs support these template variables:
+
+| Variable | Example | Description |
+|----------|---------|-------------|
+| `{cuda_version}` | `12.8` | Full CUDA version |
+| `{cuda_short}` | `128` | CUDA without dot |
+| `{torch_version}` | `2.8.0` | PyTorch version |
+| `{torch_mm}` | `28` | PyTorch major.minor |
+| `{py_version}` | `3.10` | Python version |
+| `{py_short}` | `310` | Python without dot |
+| `{platform}` | `linux_x86_64` | Platform tag |
 
 ## API Reference
 
-### IsolatedEnv
-
-Configuration for an isolated environment:
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `name` | str | Unique name for caching |
-| `python` | str | Python version (e.g., "3.10") |
-| `cuda` | str | CUDA version (e.g., "12.8") or None for CPU |
-| `requirements` | list | Pip requirements |
-| `requirements_file` | Path | Path to requirements.txt |
-| `wheel_sources` | list | URLs for `--find-links` |
-| `index_urls` | list | URLs for `--extra-index-url` |
-
-### WorkerBridge
-
-Bridge for communicating with isolated workers:
+### install()
 
 ```python
-bridge = WorkerBridge(env, worker_script)
+from comfyui_envmanager import install
 
-# Ensure environment exists
-bridge.ensure_environment(verify_packages=["torch"])
+# Auto-discover config
+install()
 
-# Call methods
-result = bridge.call("method_name", arg1=value1, arg2=value2)
+# Explicit config
+install(config="comfyui_env.toml")
 
-# Lifecycle
-bridge.start()   # Start worker (auto-called on first bridge.call)
-bridge.stop()    # Stop worker
-bridge.is_running  # Check if running
+# Isolated mode (creates separate venv)
+install(mode="isolated")
+
+# Dry run
+install(dry_run=True)
 ```
 
-### BaseWorker
-
-Base class for worker scripts:
+### WheelResolver
 
 ```python
-class MyWorker(BaseWorker):
-    def setup(self):
-        """Called once on startup - load models here"""
-        pass
+from comfyui_envmanager import RuntimeEnv, WheelResolver
 
-    def teardown(self):
-        """Called on shutdown - cleanup here"""
-        pass
+env = RuntimeEnv.detect()
+resolver = WheelResolver()
 
-    @register("my_method")
-    def my_method(self, arg1, arg2):
-        """Callable from bridge.call("my_method", ...)"""
-        return result
+url = resolver.resolve("nvdiffrast", "0.4.0", env)
+print(url)  # https://github.com/.../nvdiffrast-0.4.0+cu128torch28-...whl
 ```
 
-### GPU Detection
+### Workers (for isolation)
 
 ```python
-from comfyui_isolation import detect_cuda_version, get_gpu_summary
+from comfyui_envmanager import TorchMPWorker
 
-# Auto-detect CUDA version (12.8 for Blackwell, 12.4 for others)
+# Same-venv isolation (zero-copy tensors)
+worker = TorchMPWorker()
+result = worker.call(my_function, image=tensor)
+```
+
+## GPU Detection
+
+```python
+from comfyui_envmanager import detect_cuda_version, get_gpu_summary
+
 cuda = detect_cuda_version()  # "12.8", "12.4", or None
-
-# Get detailed GPU info
 print(get_gpu_summary())
 # GPU 0: NVIDIA GeForce RTX 5090 (sm_120) [Blackwell - CUDA 12.8]
 ```
 
-## Performance
+## Migrating from comfyui-isolation
 
-**Q: Does subprocess communication slow things down?**
+The package has been renamed. Update your imports:
 
-No. The overhead is negligible for AI/ML workloads:
-- Worker startup: ~1-2 seconds (one-time)
-- Per-call overhead: ~1-5ms for JSON serialization
-- Your inference: 10-60+ seconds
+```python
+# Old
+from comfyui_isolation import isolated
 
-The worker stays alive between calls, so startup cost is paid only once.
+# New
+from comfyui_envmanager import isolated
+```
 
-## How It Works
-
-1. **Environment Creation**: Uses `uv` to create a venv with the specified Python/CUDA versions
-2. **IPC Protocol**: JSON over stdin/stdout with base64-encoded binary data (images, tensors)
-3. **Worker Lifecycle**: Lazy start on first call, singleton pattern, graceful shutdown
-
-## Examples
-
-See the `examples/` directory:
-- `basic_node/` - Simple ComfyUI node with isolation
+Old config file names (`comfyui_isolation_reqs.toml`) are still discovered for backward compatibility.
 
 ## License
 
