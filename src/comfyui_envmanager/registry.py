@@ -149,6 +149,39 @@ PACKAGE_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
 
     # =========================================================================
+    # sageattention - Fast quantized attention (2-5x faster than FlashAttention)
+    # Linux: Prebuilt wheels from Kijai/PrecompiledWheels (v2.2.0, cp312)
+    # Windows: Prebuilt wheels from woct0rdho (v2.2.0, cp39-abi3)
+    # =========================================================================
+    "sageattention": {
+        "method": "github_release",
+        "sources": [
+            # Linux: Kijai's precompiled wheels on HuggingFace (Python 3.12)
+            {
+                "name": "kijai-hf",
+                "url_template": "https://huggingface.co/Kijai/PrecompiledWheels/resolve/main/sageattention-{version}-cp312-cp312-linux_x86_64.whl",
+                "platforms": ["linux_x86_64"],
+            },
+            # Windows: woct0rdho prebuilt wheels (ABI3: Python >= 3.9)
+            # Format: sageattention-2.2.0+cu128torch2.8.0.post3-cp39-abi3-win_amd64.whl
+            {
+                "name": "woct0rdho",
+                "url_template": "https://github.com/woct0rdho/SageAttention/releases/download/v2.2.0-windows.post3/sageattention-2.2.0%2Bcu{cuda_short}torch{torch_version}.post3-cp39-abi3-win_amd64.whl",
+                "platforms": ["win_amd64"],
+            },
+        ],
+        "description": "SageAttention - 2-5x faster than FlashAttention with quantized kernels",
+    },
+
+    # =========================================================================
+    # triton - Required for sageattention on Linux (usually bundled with PyTorch)
+    # =========================================================================
+    "triton": {
+        "method": "pypi",
+        "description": "Triton compiler for custom CUDA kernels (required by sageattention)",
+    },
+
+    # =========================================================================
     # flash-attn - Multi-source prebuilt wheels
     # Required for UniRig and other transformer-based models
     # Sources: Dao-AILab (official), mjun0812 (Linux), bdashore3 (Windows)
