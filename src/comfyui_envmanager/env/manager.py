@@ -307,16 +307,37 @@ class IsolatedEnvManager:
 
     def _install_cuda_packages(self, env: IsolatedEnv, pip_args: list) -> None:
         """Install CUDA packages using registry-based wheel resolution."""
+        import platform as plat
+
         # Build RuntimeEnv from IsolatedEnv config
+        os_name = plat.system().lower()
+        if os_name == 'darwin':
+            platform_tag = f"macosx_{plat.mac_ver()[0].replace('.', '_')}_{plat.machine()}"
+        elif os_name == 'windows':
+            platform_tag = f"win_{plat.machine().lower()}"
+        else:
+            platform_tag = f"linux_{plat.machine()}"
+
+        cuda_short = env.cuda.replace(".", "") if env.cuda else None
+        torch_short = env.pytorch_version.replace(".", "") if env.pytorch_version else None
+        torch_mm = "".join(env.pytorch_version.split(".")[:2]) if env.pytorch_version else None
+
         runtime_env = RuntimeEnv(
-            cuda_version=env.cuda,
-            torch_version=env.pytorch_version,
+            os_name=os_name,
+            platform_tag=platform_tag,
             python_version=env.python,
-            platform=self.platform.name,
+            python_short=env.python.replace(".", ""),
+            cuda_version=env.cuda,
+            cuda_short=cuda_short,
+            torch_version=env.pytorch_version,
+            torch_short=torch_short,
+            torch_mm=torch_mm,
         )
         vars_dict = runtime_env.as_dict()
         if env.cuda:
             vars_dict["cuda_short2"] = get_cuda_short2(env.cuda)
+        # Add py_tag for wheel filename templates (e.g., cp310)
+        vars_dict["py_tag"] = f"cp{env.python.replace('.', '')}"
 
         for req in env.no_deps_requirements:
             package, version = parse_wheel_requirement(req)
@@ -357,8 +378,10 @@ class IsolatedEnvManager:
 
                 elif method == "github_release":
                     # Direct wheel URL from GitHub releases
-                    result = self._install_from_github_release(
-                        package, version, vars_dict, config, pip_args
+                    release_vars = vars_dict.copy()
+                    release_vars["version"] = version or ""
+                    self._install_from_github_release(
+                        package, version, release_vars, config, pip_args
                     )
                     continue  # Already handled
 

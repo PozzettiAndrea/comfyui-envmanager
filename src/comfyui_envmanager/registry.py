@@ -98,29 +98,42 @@ PACKAGE_REGISTRY: Dict[str, Dict[str, Any]] = {
     # =========================================================================
     # PozzettiAndrea wheel repos (GitHub Pages indexes)
     # =========================================================================
+    # nvdiffrast - wheels are now at cu{cuda}-torch{torch_short} releases
     "nvdiffrast": {
         "method": "github_index",
-        "index_url": "https://pozzettiandrea.github.io/nvdiffrast-full-wheels/cu{cuda_short}-torch{torch_mm}/",
+        "index_url": "https://pozzettiandrea.github.io/nvdiffrast-full-wheels/cu{cuda_short}-torch{torch_short}/",
         "description": "NVIDIA differentiable rasterizer",
     },
+    # cumesh, o_voxel, flex_gemm, nvdiffrec_render use torch_short (3 digits: 280)
     "cumesh": {
         "method": "github_index",
-        "index_url": "https://pozzettiandrea.github.io/cumesh-wheels/cu{cuda_short}-torch{torch_mm}/",
+        "index_url": "https://pozzettiandrea.github.io/cumesh-wheels/cu{cuda_short}-torch{torch_short}/",
         "description": "CUDA-accelerated mesh utilities",
     },
     "o_voxel": {
         "method": "github_index",
-        "index_url": "https://pozzettiandrea.github.io/ovoxel-wheels/cu{cuda_short}-torch{torch_mm}/",
+        "index_url": "https://pozzettiandrea.github.io/ovoxel-wheels/cu{cuda_short}-torch{torch_short}/",
         "description": "O-Voxel CUDA extension for TRELLIS",
     },
     "flex_gemm": {
         "method": "github_index",
-        "index_url": "https://pozzettiandrea.github.io/flexgemm-wheels/cu{cuda_short}-torch{torch_mm}/",
+        "index_url": "https://pozzettiandrea.github.io/flexgemm-wheels/cu{cuda_short}-torch{torch_short}/",
         "description": "Flexible GEMM operations",
     },
     "nvdiffrec_render": {
-        "method": "github_index",
-        "index_url": "https://pozzettiandrea.github.io/nvdiffrec_render-wheels/cu{cuda_short}-torch{torch_mm}/",
+        "method": "github_release",
+        "sources": [
+            {
+                "name": "PozzettiAndrea",
+                "url_template": "https://github.com/PozzettiAndrea/nvdiffrec_render-wheels/releases/download/cu{cuda_short}-torch{torch_short}/nvdiffrec_render-{version}%2Bcu{cuda_short}torch{torch_mm}-{py_tag}-{py_tag}-linux_x86_64.whl",
+                "platforms": ["linux_x86_64"],
+            },
+            {
+                "name": "PozzettiAndrea-windows",
+                "url_template": "https://github.com/PozzettiAndrea/nvdiffrec_render-wheels/releases/download/cu{cuda_short}-torch{torch_short}/nvdiffrec_render-{version}%2Bcu{cuda_short}torch{torch_mm}-{py_tag}-{py_tag}-win_amd64.whl",
+                "platforms": ["win_amd64", "windows_amd64"],
+            },
+        ],
         "description": "NVDiffRec rendering utilities",
     },
 
