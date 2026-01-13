@@ -15,7 +15,7 @@ Compare this to examples/basic_node which uses the traditional approach
 with separate worker.py and explicit bridge management.
 """
 
-from comfyui_isolation import isolated
+from comfy_env import isolated
 
 
 # ===========================================================================

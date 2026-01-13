@@ -1,4 +1,4 @@
-# comfyui-envmanager
+# comfy-env
 
 Environment management for ComfyUI custom nodes. Provides:
 
@@ -23,7 +23,7 @@ This package solves both problems.
 ## Installation
 
 ```bash
-pip install comfyui-envmanager
+pip install comfy-env
 ```
 
 Requires [uv](https://github.com/astral-sh/uv) for fast environment creation:
@@ -36,7 +36,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ### In-Place Installation (Type 2 - CUDA Wheels)
 
-Create a `comfyui_env.toml` in your node directory:
+Create a `comfy-env.toml` in your node directory:
 
 ```toml
 [env]
@@ -55,7 +55,7 @@ wheel_sources = ["https://github.com/PozzettiAndrea/nvdiffrast-full-wheels/relea
 Then in your `__init__.py`:
 
 ```python
-from comfyui_envmanager import install
+from comfy_env import install
 
 # Install CUDA wheels into current environment
 install()
@@ -66,7 +66,7 @@ install()
 For nodes that need completely separate dependencies:
 
 ```python
-from comfyui_envmanager import isolated
+from comfy_env import isolated
 
 @isolated(env="my-node")
 class MyNode:
@@ -100,7 +100,7 @@ comfy-env doctor
 
 ## Configuration
 
-### comfyui_env.toml
+### comfy-env.toml
 
 ```toml
 [env]
@@ -149,13 +149,13 @@ Wheel URLs support these template variables:
 ### install()
 
 ```python
-from comfyui_envmanager import install
+from comfy_env import install
 
 # Auto-discover config
 install()
 
 # Explicit config
-install(config="comfyui_env.toml")
+install(config="comfy-env.toml")
 
 # Isolated mode (creates separate venv)
 install(mode="isolated")
@@ -167,7 +167,7 @@ install(dry_run=True)
 ### WheelResolver
 
 ```python
-from comfyui_envmanager import RuntimeEnv, WheelResolver
+from comfy_env import RuntimeEnv, WheelResolver
 
 env = RuntimeEnv.detect()
 resolver = WheelResolver()
@@ -179,7 +179,7 @@ print(url)  # https://github.com/.../nvdiffrast-0.4.0+cu128torch28-...whl
 ### Workers (for isolation)
 
 ```python
-from comfyui_envmanager import TorchMPWorker
+from comfy_env import TorchMPWorker
 
 # Same-venv isolation (zero-copy tensors)
 worker = TorchMPWorker()
@@ -189,26 +189,12 @@ result = worker.call(my_function, image=tensor)
 ## GPU Detection
 
 ```python
-from comfyui_envmanager import detect_cuda_version, get_gpu_summary
+from comfy_env import detect_cuda_version, get_gpu_summary
 
 cuda = detect_cuda_version()  # "12.8", "12.4", or None
 print(get_gpu_summary())
 # GPU 0: NVIDIA GeForce RTX 5090 (sm_120) [Blackwell - CUDA 12.8]
 ```
-
-## Migrating from comfyui-isolation
-
-The package has been renamed. Update your imports:
-
-```python
-# Old
-from comfyui_isolation import isolated
-
-# New
-from comfyui_envmanager import isolated
-```
-
-Old config file names (`comfyui_isolation_reqs.toml`) are still discovered for backward compatibility.
 
 ## License
 

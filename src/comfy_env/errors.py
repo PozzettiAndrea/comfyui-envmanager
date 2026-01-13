@@ -1,5 +1,5 @@
 """
-Rich error messages for comfyui-envmanager.
+Rich error messages for comfy-env.
 
 This module provides error classes with actionable, user-friendly messages.
 Instead of cryptic pip errors, users see exactly what went wrong and what
@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
 
 class EnvManagerError(Exception):
-    """Base exception for comfyui-envmanager errors."""
+    """Base exception for comfy-env errors."""
 
     def __init__(self, message: str, details: Optional[str] = None):
         self.message = message

@@ -1,12 +1,12 @@
 """
-Installation API for comfyui-envmanager.
+Installation API for comfy-env.
 
 This module provides the main `install()` function that handles both:
 - In-place installation (CUDA wheels into current environment)
 - Isolated installation (create separate venv with dependencies)
 
 Example:
-    from comfyui_envmanager import install
+    from comfy_env import install
 
     # In-place install (auto-discovers config)
     install()

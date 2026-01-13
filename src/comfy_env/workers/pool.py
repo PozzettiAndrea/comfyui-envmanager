@@ -3,14 +3,14 @@ WorkerPool - Global registry and management of named workers.
 
 Provides a simple API for getting workers by name:
 
-    from comfyui_envmanager.workers import get_worker
+    from comfy_env.workers import get_worker
 
     worker = get_worker("sam3d")
     result = worker.call_module("my_module", "my_func", image=tensor)
 
 Workers are registered at startup and reused across calls:
 
-    from comfyui_envmanager.workers import register_worker, TorchMPWorker
+    from comfy_env.workers import register_worker, TorchMPWorker
 
     register_worker("default", TorchMPWorker())
     register_worker("sam3d", PersistentVenvWorker(

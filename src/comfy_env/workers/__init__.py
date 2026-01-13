@@ -20,7 +20,7 @@ Tier 3: ContainerWorker (full isolation) [future]
     - Use for: Different CUDA versions, hermetic environments
 
 Usage:
-    from comfyui_envmanager.workers import get_worker, TorchMPWorker
+    from comfy_env.workers import get_worker, TorchMPWorker
 
     # Get a named worker from the pool
     worker = get_worker("sam3d")

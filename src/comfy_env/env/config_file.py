@@ -4,9 +4,11 @@ This module provides declarative configuration for isolated environments,
 allowing custom nodes to define their requirements in a TOML file instead
 of programmatically.
 
+Config file: comfy-env.toml
+
 Simplified config (recommended for CUDA packages only):
 
-    # comfyui_env.toml - just list CUDA packages
+    # comfy-env.toml - just list CUDA packages
     [cuda]
     torch-scatter = "2.1.2"
     torch-cluster = "1.6.3"
@@ -26,7 +28,7 @@ Optional overrides:
     cuda = "12.4"       # Override auto-detection
     pytorch = "2.5.1"   # Override auto-detection
 
-Legacy format (still supported):
+Full format:
 
     [env]
     name = "my-node"
@@ -65,13 +67,9 @@ from .config import IsolatedEnv, EnvManagerConfig, LocalConfig, NodeReq
 from .detection import detect_cuda_version
 
 
-# Standard file names to search for (in order of priority)
+# Config file name
 CONFIG_FILE_NAMES = [
-    "comfyui_env.toml",           # New canonical name
-    "comfyui_envmanager.toml",    # Alternative
-    "comfyui_isolation_reqs.toml", # Legacy (backward compat)
-    "comfyui_isolation.toml",      # Legacy (backward compat)
-    "isolation.toml",              # Legacy (backward compat)
+    "comfy-env.toml",
 ]
 
 
@@ -95,7 +93,7 @@ def load_env_from_file(
         ImportError: If tomli is not installed (Python < 3.11)
 
     Example:
-        >>> env = load_env_from_file(Path("my_node/comfyui_isolation_reqs.toml"))
+        >>> env = load_env_from_file(Path("my_node/comfy-env.toml"))
         >>> print(env.name)
         'my-node'
     """
@@ -354,7 +352,7 @@ def load_config(
         EnvManagerConfig with local, envs, and node_reqs
 
     Example:
-        >>> config = load_config(Path("comfyui_env.toml"))
+        >>> config = load_config(Path("comfy-env.toml"))
         >>> if config.has_local:
         ...     print(f"Local CUDA packages: {config.local.cuda_packages}")
         >>> for name, env in config.envs.items():

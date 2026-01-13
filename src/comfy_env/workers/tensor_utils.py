@@ -12,7 +12,7 @@ import threading
 import time
 from typing import Any
 
-logger = logging.getLogger("comfyui_envmanager")
+logger = logging.getLogger("comfy_env")
 
 
 # ---------------------------------------------------------------------------

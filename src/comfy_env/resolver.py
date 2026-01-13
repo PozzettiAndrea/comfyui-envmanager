@@ -9,7 +9,7 @@ and validates that they exist. If a wheel doesn't exist, it fails fast with
 a clear error message.
 
 Example:
-    from comfyui_envmanager.resolver import WheelResolver, RuntimeEnv
+    from comfy_env.resolver import WheelResolver, RuntimeEnv
 
     env = RuntimeEnv.detect()
     resolver = WheelResolver()

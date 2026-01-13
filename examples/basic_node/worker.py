@@ -4,7 +4,7 @@ Example worker script for isolated environment.
 This runs in the isolated Python environment and handles inference requests.
 """
 
-from comfyui_isolation import BaseWorker, register
+from comfy_env import BaseWorker, register
 
 
 class ExampleWorker(BaseWorker):

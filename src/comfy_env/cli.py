@@ -1,5 +1,5 @@
 """
-CLI for comfyui-envmanager.
+CLI for comfy-env.
 
 Provides the `comfy-env` command with subcommands:
 - install: Install dependencies from config
@@ -135,7 +135,7 @@ def main(args: Optional[List[str]] = None) -> int:
     list_parser = subparsers.add_parser(
         "list-packages",
         help="Show all packages in the built-in registry",
-        description="List CUDA packages that comfyui-envmanager knows how to install",
+        description="List CUDA packages that comfy-env knows how to install",
     )
     list_parser.add_argument(
         "--json",

@@ -1,5 +1,5 @@
 """
-comfyui-envmanager: Environment management for ComfyUI custom nodes.
+comfy-env: Environment management for ComfyUI custom nodes.
 
 This package provides:
 - CUDA wheel resolution and in-place installation (Type 2 nodes)
@@ -7,7 +7,7 @@ This package provides:
 
 ## Quick Start - In-Place Installation
 
-    from comfyui_envmanager import install
+    from comfy_env import install
 
     # Auto-discover config and install CUDA wheels
     install()
@@ -17,14 +17,14 @@ This package provides:
 
 ## Quick Start - Process Isolation
 
-    from comfyui_envmanager.workers import get_worker, TorchMPWorker
+    from comfy_env.workers import get_worker, TorchMPWorker
 
     # Same-venv isolation (zero-copy tensors)
     worker = TorchMPWorker()
     result = worker.call(my_gpu_function, image=tensor)
 
     # Cross-venv isolation
-    from comfyui_envmanager.workers import PersistentVenvWorker
+    from comfy_env.workers import PersistentVenvWorker
     worker = PersistentVenvWorker(python="/path/to/venv/bin/python")
     result = worker.call_module("my_module", "my_func", image=tensor)
 

@@ -5,11 +5,11 @@ This demonstrates how to use comfyui-isolation in a ComfyUI custom node.
 
 Two approaches are shown:
 1. Programmatic configuration (IsolatedEnv directly in code)
-2. Declarative configuration (comfyui_isolation_reqs.toml file)
+2. Declarative configuration (comfy_env_reqs.toml file)
 """
 
 from pathlib import Path
-from comfyui_isolation import IsolatedEnv, WorkerBridge, detect_cuda_version
+from comfy_env import IsolatedEnv, WorkerBridge, detect_cuda_version
 
 # Get the node's root directory
 NODE_ROOT = Path(__file__).parent
@@ -52,7 +52,7 @@ def get_bridge() -> WorkerBridge:
 # ===========================================================================
 # APPROACH 2: Declarative Configuration (recommended for new projects)
 # ===========================================================================
-# Instead of the above, you can use a comfyui_isolation_reqs.toml file:
+# Instead of the above, you can use a comfy_env_reqs.toml file:
 #
 # def get_bridge() -> WorkerBridge:
 #     """Get or create the worker bridge singleton (config file approach)."""
@@ -64,7 +64,7 @@ def get_bridge() -> WorkerBridge:
 #         )
 #     return _bridge
 #
-# This auto-discovers comfyui_isolation_reqs.toml in the node directory.
+# This auto-discovers comfy_env_reqs.toml in the node directory.
 # See the example file in this directory for the format.
 
 

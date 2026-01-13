@@ -30,7 +30,7 @@ class WorkerBridge:
     - Timeout support
 
     Example:
-        from comfyui_envmanager import IsolatedEnv, WorkerBridge
+        from comfy_env import IsolatedEnv, WorkerBridge
 
         env = IsolatedEnv(
             name="my-node",

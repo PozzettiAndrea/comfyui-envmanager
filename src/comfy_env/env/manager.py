@@ -456,24 +456,24 @@ class IsolatedEnvManager:
                 result = result.replace(f"{{{key}}}", str(value))
         return result
 
-    def _install_comfyui_envmanager(self, env: IsolatedEnv) -> None:
-        """Install comfyui-envmanager package (needed for BaseWorker)."""
+    def _install_comfy_env(self, env: IsolatedEnv) -> None:
+        """Install comfy-env package (needed for BaseWorker)."""
         python_exe = self.get_python(env)
         uv = self._find_uv()
 
-        self.log("Installing comfyui-envmanager (for worker support)...")
+        self.log("Installing comfy-env (for worker support)...")
         result = subprocess.run(
             [str(uv), "pip", "install", "--python", str(python_exe),
              "--upgrade", "--no-cache",
-             "comfyui-envmanager @ git+https://github.com/PozzettiAndrea/comfyui-envmanager"],
+             "comfy-env @ git+https://github.com/PozzettiAndrea/comfy-env"],
             capture_output=True,
             text=True,
         )
         if result.returncode != 0:
             # Non-fatal - might already be installed or network issues
-            self.log(f"Warning: Failed to install comfyui-envmanager: {result.stderr}")
+            self.log(f"Warning: Failed to install comfy-env: {result.stderr}")
         else:
-            self.log("comfyui-envmanager installed")
+            self.log("comfy-env installed")
 
     def setup(
         self,
@@ -510,8 +510,8 @@ class IsolatedEnvManager:
         if install_pytorch and (env.cuda is not None or detect_cuda_version()):
             self.install_pytorch(env)
 
-        # Install comfyui-envmanager (needed for BaseWorker in workers)
-        self._install_comfyui_envmanager(env)
+        # Install comfy-env (needed for BaseWorker in workers)
+        self._install_comfy_env(env)
 
         # Install other requirements
         self.install_requirements(env)
