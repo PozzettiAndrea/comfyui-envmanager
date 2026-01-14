@@ -73,10 +73,29 @@ class IsolatedEnvManager:
             raise RuntimeError(f"Platform incompatible: {error}")
 
     def _find_uv(self) -> Optional[Path]:
-        """Find uv executable."""
+        """Find uv executable in PATH or current Python environment."""
+        # First check system PATH
         uv_path = shutil.which("uv")
         if uv_path:
             return Path(uv_path)
+
+        # Check current Python environment's Scripts/bin folder
+        import sys
+        if sys.platform == "win32":
+            candidates = [
+                Path(sys.prefix) / "Scripts" / "uv.exe",
+                Path(sys.base_prefix) / "Scripts" / "uv.exe",
+            ]
+        else:
+            candidates = [
+                Path(sys.prefix) / "bin" / "uv",
+                Path(sys.base_prefix) / "bin" / "uv",
+            ]
+
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+
         return None
 
     def _run_uv(self, args: list, env_dir: Optional[Path] = None, **kwargs) -> subprocess.CompletedProcess:
