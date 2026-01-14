@@ -529,6 +529,30 @@ def _parse_single_env(name: str, env_data: Dict[str, Any], base_dir: Path) -> Is
     elif isinstance(packages_section, list):
         requirements = packages_section
 
+    # Parse platform-specific packages [envname.packages.windows], etc.
+    windows_reqs = []
+    linux_reqs = []
+    darwin_reqs = []
+
+    if isinstance(packages_section, dict):
+        win_section = packages_section.get("windows", {})
+        if isinstance(win_section, dict):
+            windows_reqs = win_section.get("requirements", [])
+        elif isinstance(win_section, list):
+            windows_reqs = win_section
+
+        linux_section = packages_section.get("linux", {})
+        if isinstance(linux_section, dict):
+            linux_reqs = linux_section.get("requirements", [])
+        elif isinstance(linux_section, list):
+            linux_reqs = linux_section
+
+        darwin_section = packages_section.get("darwin", {})
+        if isinstance(darwin_section, dict):
+            darwin_reqs = darwin_section.get("requirements", [])
+        elif isinstance(darwin_section, list):
+            darwin_reqs = darwin_section
+
     return IsolatedEnv(
         name=name,
         python=python,
@@ -536,6 +560,9 @@ def _parse_single_env(name: str, env_data: Dict[str, Any], base_dir: Path) -> Is
         pytorch_version=pytorch,
         requirements=requirements,
         no_deps_requirements=no_deps_requirements,
+        windows_requirements=windows_reqs,
+        linux_requirements=linux_reqs,
+        darwin_requirements=darwin_reqs,
     )
 
 

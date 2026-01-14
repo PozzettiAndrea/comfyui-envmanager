@@ -263,13 +263,29 @@ class IsolatedEnvManager:
         """
         python_exe = self.get_python(env)
 
-        if not env.requirements and not env.requirements_file:
+        # Merge platform-specific requirements
+        if sys.platform == 'win32':
+            platform_reqs = env.windows_requirements
+            platform_name = 'Windows'
+        elif sys.platform == 'darwin':
+            platform_reqs = env.darwin_requirements
+            platform_name = 'macOS'
+        else:
+            platform_reqs = env.linux_requirements
+            platform_name = 'Linux'
+
+        all_requirements = list(env.requirements) + list(platform_reqs)
+
+        if platform_reqs:
+            self.log(f"Including {len(platform_reqs)} {platform_name}-specific packages")
+
+        if not all_requirements and not env.requirements_file:
             self.log("No requirements to install")
             return
 
         # Validate requirements for security
-        if env.requirements:
-            validate_dependencies(env.requirements)
+        if all_requirements:
+            validate_dependencies(all_requirements)
 
         # Validate wheel sources
         for wheel_source in env.wheel_sources:
@@ -311,11 +327,11 @@ class IsolatedEnvManager:
             self.log(f"Installing {len(env.no_deps_requirements)} CUDA packages")
             self._install_cuda_packages(env, pip_args)
 
-        # Install individual requirements
-        if env.requirements:
-            self.log(f"Installing {len(env.requirements)} packages")
+        # Install individual requirements (including platform-specific)
+        if all_requirements:
+            self.log(f"Installing {len(all_requirements)} packages")
             result = subprocess.run(
-                pip_args + env.requirements,
+                pip_args + all_requirements,
                 capture_output=True,
                 text=True,
             )
