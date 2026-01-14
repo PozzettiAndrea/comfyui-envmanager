@@ -421,6 +421,19 @@ import json
 import traceback
 from types import SimpleNamespace
 
+# On Windows, add host Python's DLL directories so packages like opencv can find VC++ runtime
+if sys.platform == "win32":
+    _host_python_dir = os.environ.get("COMFYUI_HOST_PYTHON_DIR")
+    if _host_python_dir and hasattr(os, "add_dll_directory"):
+        try:
+            os.add_dll_directory(_host_python_dir)
+            # Also add DLLs subdirectory if it exists
+            _dlls_dir = os.path.join(_host_python_dir, "DLLs")
+            if os.path.isdir(_dlls_dir):
+                os.add_dll_directory(_dlls_dir)
+        except Exception:
+            pass
+
 def _deserialize_isolated_objects(obj):
     """Reconstruct objects serialized with __isolated_object__ marker."""
     if isinstance(obj, dict):
@@ -437,6 +450,10 @@ def _deserialize_isolated_objects(obj):
     return obj
 
 def main():
+    # Save original stdout for JSON IPC - redirect stdout to stderr for module prints
+    _ipc_out = sys.stdout
+    sys.stdout = sys.stderr  # All print() calls go to stderr now
+
     # Read config from first line
     config_line = sys.stdin.readline()
     if not config_line:
@@ -451,9 +468,9 @@ def main():
     # Import torch after path setup
     import torch
 
-    # Signal ready
-    sys.stdout.write(json.dumps({"status": "ready"}) + "\\n")
-    sys.stdout.flush()
+    # Signal ready (use _ipc_out, not stdout)
+    _ipc_out.write(json.dumps({"status": "ready"}) + "\\n")
+    _ipc_out.flush()
 
     # Process requests
     while True:
@@ -504,16 +521,16 @@ def main():
             if outputs_path:
                 torch.save(result, outputs_path)
 
-            sys.stdout.write(json.dumps({"status": "ok"}) + "\\n")
-            sys.stdout.flush()
+            _ipc_out.write(json.dumps({"status": "ok"}) + "\\n")
+            _ipc_out.flush()
 
         except Exception as e:
-            sys.stdout.write(json.dumps({
+            _ipc_out.write(json.dumps({
                 "status": "error",
                 "error": str(e),
                 "traceback": traceback.format_exc(),
             }) + "\\n")
-            sys.stdout.flush()
+            _ipc_out.flush()
 
 if __name__ == "__main__":
     main()
@@ -598,6 +615,11 @@ class PersistentVenvWorker(Worker):
         env.update(self.extra_env)
         env["COMFYUI_ISOLATION_WORKER"] = "1"
 
+        # On Windows, pass host Python directory so worker can add it via os.add_dll_directory()
+        # This fixes "DLL load failed" errors for packages like opencv-python-headless
+        if sys.platform == "win32":
+            env["COMFYUI_HOST_PYTHON_DIR"] = str(Path(sys.executable).parent)
+
         # Find ComfyUI base and set env var for folder_paths stub
         comfyui_base = self._find_comfyui_base()
         if comfyui_base:
@@ -619,6 +641,18 @@ class PersistentVenvWorker(Worker):
             bufsize=1,  # Line buffered
             text=True,  # Text mode for JSON
         )
+
+        # Start stderr forwarding thread to show worker output in real-time
+        def forward_stderr():
+            try:
+                for line in self._process.stderr:
+                    # Forward to main process stderr (visible in console)
+                    sys.stderr.write(f"  {line}")
+                    sys.stderr.flush()
+            except:
+                pass
+        self._stderr_thread = threading.Thread(target=forward_stderr, daemon=True)
+        self._stderr_thread.start()
 
         # Send config
         config = {"sys_paths": all_sys_path}

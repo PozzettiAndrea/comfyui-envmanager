@@ -502,6 +502,57 @@ class IsolatedEnvManager:
         else:
             self.log("comfy-env installed")
 
+    def _setup_windows_deps(self, env: IsolatedEnv, env_dir: Path) -> None:
+        """
+        Set up Windows-specific dependencies (VC++ runtime, DLL paths).
+
+        This:
+        1. Installs msvc-runtime package (provides VC++ DLLs)
+        2. Sets up the Lib/x64/vc17/bin directory structure for opencv
+        """
+        python_exe = self.get_python(env)
+        uv = self._find_uv()
+
+        # Install msvc-runtime package to get VC++ DLLs
+        self.log("Installing VC++ runtime (msvc-runtime)...")
+        result = subprocess.run(
+            [str(uv), "pip", "install", "--python", str(python_exe), "msvc-runtime"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            self.log(f"Warning: Failed to install msvc-runtime: {result.stderr}")
+        else:
+            self.log("msvc-runtime installed")
+
+        # Set up opencv DLL paths (copies DLLs to Lib/x64/vc17/bin)
+        self.log("Setting up opencv DLL paths...")
+        success, msg = self.platform.setup_opencv_dll_paths(env_dir)
+        if success:
+            if msg:
+                self.log(f"  {msg}")
+        else:
+            self.log(f"Warning: {msg}")
+
+    def ensure_system_deps(self) -> bool:
+        """
+        Ensure system-level dependencies are installed (Windows only).
+
+        On Windows, this checks for Media Foundation and installs if missing.
+        Returns True if all deps are available, False otherwise.
+        """
+        if self.platform.name != 'windows':
+            return True
+
+        # Check and install Media Foundation if needed
+        success, error = self.platform.ensure_media_foundation(self.log)
+        if not success:
+            self.log(f"WARNING: {error}")
+            self.log("Some packages (like opencv) may not work correctly.")
+            return False
+
+        return True
+
     def setup(
         self,
         env: IsolatedEnv,
@@ -525,6 +576,9 @@ class IsolatedEnvManager:
         self.log(f"Setting up isolated environment: {env.name}")
         self.log("=" * 50)
 
+        # Ensure system-level deps (Media Foundation on Windows)
+        self.ensure_system_deps()
+
         # Check if already ready
         if self.is_ready(env, verify_packages):
             self.log("Environment already ready, skipping setup")
@@ -543,12 +597,9 @@ class IsolatedEnvManager:
         # Install other requirements
         self.install_requirements(env)
 
-        # Windows: Bundle VC++ DLLs
+        # Windows: Install VC++ runtime and set up DLL paths
         if self.platform.name == 'windows':
-            self.log("Bundling VC++ DLLs...")
-            success, error = self.platform.bundle_vc_dlls_to_env(env_dir)
-            if not success:
-                self.log(f"Warning: {error}")
+            self._setup_windows_deps(env, env_dir)
 
         # Verify installation
         if verify_packages:
