@@ -137,11 +137,14 @@ class RuntimeEnv:
             "py_version": self.python_version,
             "py_short": self.python_short,
             "py_minor": py_minor,
+            "py_tag": f"cp{self.python_short}",  # e.g., cp310, cp311
         }
 
         if self.cuda_version:
             result["cuda_version"] = self.cuda_version
             result["cuda_short"] = self.cuda_short
+            # cuda_major: just the major version (e.g., "12" from "12.8")
+            result["cuda_major"] = self.cuda_version.split(".")[0]
 
         if self.torch_version:
             result["torch_version"] = self.torch_version

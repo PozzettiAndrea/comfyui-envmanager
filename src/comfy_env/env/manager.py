@@ -475,7 +475,7 @@ class IsolatedEnvManager:
             url_template = source["url_template"]
             url = self._substitute_template(url_template, vars_dict)
 
-            self.log(f"    Trying {source.get('name', 'unknown')}: {url[:80]}...")
+            self.log(f"    Trying {source.get('name', 'unknown')}: {url}")
             result = subprocess.run(
                 pip_args + ["--no-deps", url],
                 capture_output=True, text=True,
@@ -484,7 +484,7 @@ class IsolatedEnvManager:
             if result.returncode == 0:
                 return  # Success!
 
-            errors.append(f"{source.get('name', 'unknown')}: {result.stderr[:100]}")
+            errors.append(f"{source.get('name', 'unknown')}: {result.stderr.strip()}")
 
         # All sources failed
         raise RuntimeError(
