@@ -176,7 +176,7 @@ def create_pixi_toml(
     lines = []
 
     # Project section
-    lines.append("[project]")
+    lines.append("[workspace]")
     lines.append(f'name = "{env_config.name}"')
     lines.append('version = "0.1.0"')
 
