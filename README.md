@@ -98,7 +98,7 @@ comfy-env resolve nvdiffrast==0.4.0
 comfy-env doctor
 ```
 
-## Configuration
+## Configurations
 
 ### comfy-env.toml
 
