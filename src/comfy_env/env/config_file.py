@@ -63,7 +63,7 @@ else:
     except ImportError:
         tomllib = None  # type: ignore
 
-from .config import IsolatedEnv, EnvManagerConfig, LocalConfig, NodeReq, SystemConfig, ToolConfig
+from .config import IsolatedEnv, EnvManagerConfig, LocalConfig, NodeReq, SystemConfig, ToolConfig, CondaConfig
 from .cuda_gpu_detection import detect_cuda_version
 
 
@@ -515,15 +515,27 @@ def _parse_single_env(name: str, env_data: Dict[str, Any], base_dir: Path) -> Is
     if pytorch == "auto":
         pytorch = _get_default_pytorch_version(cuda)
 
-    # Parse [envname.cuda] - CUDA packages
+    # Parse [envname.conda] - conda packages (uses pixi backend)
+    conda_section = env_data.get("conda", {})
+    conda_config = None
+    if isinstance(conda_section, dict) and ("channels" in conda_section or "packages" in conda_section):
+        # This is a conda config with channels/packages
+        channels = conda_section.get("channels", [])
+        packages = conda_section.get("packages", [])
+        if packages:
+            conda_config = CondaConfig(channels=channels, packages=packages)
+
+    # Parse [envname.cuda] - CUDA packages (separate from conda)
     cuda_section = env_data.get("cuda", {})
     no_deps_requirements = []
     if isinstance(cuda_section, dict):
-        for pkg, ver in cuda_section.items():
-            if ver == "*" or ver == "":
-                no_deps_requirements.append(pkg)
-            else:
-                no_deps_requirements.append(f"{pkg}=={ver}")
+        # Skip if this looks like a conda section (has channels/packages keys)
+        if not ("channels" in cuda_section or "packages" in cuda_section):
+            for pkg, ver in cuda_section.items():
+                if ver == "*" or ver == "":
+                    no_deps_requirements.append(pkg)
+                else:
+                    no_deps_requirements.append(f"{pkg}=={ver}")
 
     # Parse [envname.packages] - regular packages
     packages_section = env_data.get("packages", {})
@@ -567,6 +579,7 @@ def _parse_single_env(name: str, env_data: Dict[str, Any], base_dir: Path) -> Is
         windows_requirements=windows_reqs,
         linux_requirements=linux_reqs,
         darwin_requirements=darwin_reqs,
+        conda=conda_config,
     )
 
 

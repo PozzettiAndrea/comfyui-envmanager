@@ -1,6 +1,6 @@
 __version__ = "0.0.14"
 
-from .env.config import IsolatedEnv, EnvManagerConfig, LocalConfig, NodeReq
+from .env.config import IsolatedEnv, EnvManagerConfig, LocalConfig, NodeReq, CondaConfig
 from .env.config_file import (
     load_env_from_file,
     discover_env_config,
@@ -33,6 +33,16 @@ from .decorator import isolated, shutdown_all_processes
 # New in-place installation API
 from .install import install, verify_installation
 from .resolver import RuntimeEnv, WheelResolver
+
+# Pixi integration (for conda packages)
+from .pixi import (
+    ensure_pixi,
+    get_pixi_path,
+    pixi_install,
+    create_pixi_toml,
+    get_pixi_python,
+    pixi_run,
+)
 from .errors import (
     EnvManagerError,
     ConfigError,
@@ -73,6 +83,13 @@ __all__ = [
     "verify_installation",
     "RuntimeEnv",
     "WheelResolver",
+    # Pixi integration (for conda packages)
+    "ensure_pixi",
+    "get_pixi_path",
+    "pixi_install",
+    "create_pixi_toml",
+    "get_pixi_python",
+    "pixi_run",
     # Errors
     "EnvManagerError",
     "ConfigError",
@@ -93,6 +110,7 @@ __all__ = [
     "EnvManagerConfig",
     "LocalConfig",
     "NodeReq",
+    "CondaConfig",
     "IsolatedEnvManager",
     # Config file loading
     "load_env_from_file",

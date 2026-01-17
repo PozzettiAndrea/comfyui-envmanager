@@ -29,6 +29,17 @@ class LocalConfig:
 
 
 @dataclass
+class CondaConfig:
+    """Configuration for conda packages (installed via pixi).
+
+    When present, the environment uses pixi as the backend instead of uv.
+    Pixi manages both conda and pip packages in a unified environment.
+    """
+    channels: List[str] = field(default_factory=list)  # conda channels
+    packages: List[str] = field(default_factory=list)  # conda packages
+
+
+@dataclass
 class NodeReq:
     """A node dependency (another ComfyUI node pack)."""
     name: str
@@ -139,6 +150,8 @@ class IsolatedEnv:
     # Worker configuration
     worker_package: Optional[str] = None  # e.g., "worker" -> worker/__main__.py
     worker_script: Optional[str] = None   # e.g., "worker.py" -> worker.py
+    # Conda configuration (uses pixi backend when present)
+    conda: Optional["CondaConfig"] = None
 
     def __post_init__(self):
         """Validate and normalize configuration."""
@@ -175,3 +188,8 @@ class IsolatedEnv:
         if self.env_dir is not None:
             return self.env_dir
         return base_dir / f"_env_{self.name}"
+
+    @property
+    def uses_conda(self) -> bool:
+        """Check if this environment uses conda packages (pixi backend)."""
+        return self.conda is not None and bool(self.conda.packages)

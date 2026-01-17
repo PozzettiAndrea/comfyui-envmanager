@@ -25,10 +25,11 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
 from .env.config import IsolatedEnv, SystemConfig
-from .env.config_file import discover_env_config, load_env_from_file, load_config, discover_config
+from .env.config_file import load_config, discover_config
 from .env.manager import IsolatedEnvManager
 from .errors import CUDANotFoundError, DependencyError, InstallError, WheelNotFoundError
-from .registry import PACKAGE_REGISTRY, get_cuda_short2, is_registered
+from .pixi import pixi_install
+from .registry import PACKAGE_REGISTRY, get_cuda_short2
 from .resolver import RuntimeEnv, WheelResolver, parse_wheel_requirement
 
 
@@ -198,26 +199,17 @@ def install(
     if env_config:
         log(f"Found configuration: {env_config.name}")
 
+    # Check if environment uses conda packages (pixi backend)
+    if env_config and env_config.uses_conda:
+        log(f"Environment uses conda packages - using pixi backend")
+        return pixi_install(env_config, node_dir, log, dry_run)
+
     if mode == "isolated" and env_config:
         return _install_isolated(env_config, node_dir, log, dry_run)
     elif env_config:
         return _install_inplace(env_config, node_dir, log, dry_run, verify_wheels)
     else:
         return True
-
-
-def _load_config(
-    config: Optional[Union[str, Path]],
-    node_dir: Path,
-) -> Optional[IsolatedEnv]:
-    """Load configuration from file or auto-discover."""
-    if config is not None:
-        config_path = Path(config)
-        if not config_path.is_absolute():
-            config_path = node_dir / config_path
-        return load_env_from_file(config_path, node_dir)
-
-    return discover_env_config(node_dir)
 
 
 def _load_full_config(config: Optional[Union[str, Path]], node_dir: Path):
